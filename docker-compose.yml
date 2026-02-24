@@ -1,0 +1,31 @@
+services:
+  croccante:
+    image: ghcr.io/gaulatti/croccante:latest
+    container_name: croccante
+    restart: unless-stopped
+
+    # Stream keys are read from .env on the host — never committed to git
+    env_file:
+      - .env
+
+    ports:
+      # Expose RTMP only on loopback so the existing nginx edge proxy
+      # can forward port 1935 without binding to 0.0.0.0 directly.
+      # Change to "0.0.0.0:1935:1935" if OBS connects directly.
+      - "127.0.0.1:1935:1935"
+
+    # Constrain resources — pure relay needs very little CPU/RAM
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+        reservations:
+          cpus: "0.1"
+          memory: 32M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,89 @@
+name: Build → GHCR → Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # allow manual triggers
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE:    ghcr.io/${{ github.repository }}
+
+jobs:
+  # ── 1. Build & push image to GHCR ─────────────────────────────────────────
+  build:
+    name: Build & push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+  # ── 2. Deploy to server via SSH ────────────────────────────────────────────
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production   # optional: require manual approval in GitHub
+
+    steps:
+      - name: SSH → pull → stop → rm → run
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host:       ${{ secrets.SERVER_HOST }}
+          username:   ${{ secrets.SERVER_USER }}
+          key:        ${{ secrets.SERVER_SSH_KEY }}
+          fingerprint: ${{ secrets.SERVER_SSH_FINGERPRINT }}
+          script: |
+            set -eu
+
+            # Log in to GHCR on the server using a PAT stored as a server-side
+            # env var (or pass it via secrets.GHCR_PAT if preferred).
+            echo "${{ secrets.GHCR_PAT }}" \
+              | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Pull the exact image built by this run
+            docker pull ${{ env.IMAGE }}:${{ github.sha }}
+            docker tag  ${{ env.IMAGE }}:${{ github.sha }} \
+                        ${{ env.IMAGE }}:latest
+
+            # Hot-switch: stop and remove the old container, start the new one
+            docker stop croccante || true
+            docker rm   croccante || true
+            docker run -d \
+              --name croccante \
+              --restart unless-stopped \
+              --env-file /opt/croccante/.env \
+              -p 127.0.0.1:1935:1935 \
+              ${{ env.IMAGE }}:latest
+
+            # Remove dangling images to keep the host tidy
+            docker image prune -f

@@ -1,0 +1,11 @@
+# Runtime secrets — NEVER commit
+.env
+
+# Editor
+.DS_Store
+.idea/
+*.swp
+*.swo
+
+# Generated nginx config (rendered from template at container start)
+nginx.conf
