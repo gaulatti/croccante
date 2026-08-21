@@ -14,6 +14,16 @@ PUBLISHER_FILE="$HOOK_DIR/publisher"
 # file instead. entrypoint.sh tails it onto the container's stdout.
 HOOK_LOG="$HOOK_DIR/hooks.log"
 
+# A broadcast session begins at the first publish after container start and
+# never ends on its own. Filler runs only inside a session, which is what keeps
+# it from pushing black frames at a destination before the operator has ever
+# gone live. entrypoint.sh wipes the state directory, so a restart ends the
+# session — that is the documented way to end a broadcast.
+SESSION_FILE="$HOOK_DIR/session"
+
+# Generated once by make-filler.sh before any supervisor starts.
+FILLER_FILE="$STATE_DIR/filler.flv"
+
 # Redact the key-bearing tail of a destination URL before it reaches a log.
 # rtmp://a.rtmp.youtube.com/live2/abcd-efgh-ijkl  ->  rtmp://a.rtmp.youtube.com/live2/***
 mask_dest() {

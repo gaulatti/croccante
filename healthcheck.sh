@@ -44,8 +44,21 @@ while [ "$i" -le "$COUNT" ]; do
         exit 1
     fi
 
+    # Inside a session, idle means the destination is being fed nothing at all.
+    if [ -f "$SESSION_FILE" ] && [ "$state" = "idle" ]; then
+        echo "supervisor $i idle during an open broadcast session"
+        exit 1
+    fi
+
     if [ "$state" = "relaying" ] && ! pid_alive "$STATE_DIR/dest-$i.ffmpeg.pid"; then
         echo "supervisor $i claims to be relaying but has no ffmpeg"
+        exit 1
+    fi
+
+    # Filler is healthy, but only if it is actually pushing. A filler-mode
+    # supervisor with no ffmpeg is a starved outbound leg wearing a green badge.
+    if [ "$state" = "filler" ] && ! pid_alive "$STATE_DIR/dest-$i.ffmpeg.pid"; then
+        echo "supervisor $i claims to be filling but has no ffmpeg"
         exit 1
     fi
 

@@ -27,8 +27,9 @@ destination that the healthcheck can reason about.
 
 | State      | Meaning                                                        |
 |------------|----------------------------------------------------------------|
-| `idle`     | No publisher connected. Nothing is being pushed.               |
+| `idle`     | No broadcast session yet. Nothing is being pushed.             |
 | `relaying` | Publisher live; ffmpeg is copying the stream to this destination. |
+| `filler`   | Session open but publisher gone; the filler asset is looped out. |
 | `backoff`  | The last attempt failed. Waiting before retrying.              |
 
 Backoff doubles from 1s to `RELAY_BACKOFF_MAX` (default 30s). A relay that ran
@@ -118,3 +119,57 @@ port 8080) is what makes this more than a port probe.
 | Clean publisher disconnect              | ~1s (watchdog poll)           |
 | Abrupt publisher loss (cable pulled)    | up to ~10s (`drop_idle_publisher`) |
 | Failed relay attempt → retry            | 1s, doubling to 30s           |
+
+## Filler, and the broadcast session
+
+The container runs on the server, not on the machine running OBS. When the
+publisher's uplink drops — a captive portal being the painful case — the
+publisher leg dies, the relay hits EOF, and without intervention the outbound
+leg dies with it and the platform ends the broadcast.
+
+Filler covers that gap. While a session is open but no publisher is connected,
+every destination is fed a pre-encoded asset instead of the live input.
+
+**The asset is encoded once**, at container start, by `make-filler.sh`, at the
+configured broadcast profile. It is then looped to every destination with
+`-c copy`. No encoder runs per destination, so destination count does not cost
+CPU, and a destination sees identical codec, resolution, framerate and audio
+layout across live → filler → live. A mid-stream parameter change is one of the
+things platforms drop a stream for.
+
+### The session boundary
+
+There is no session concept in nginx, so croccante defines one: a session opens
+at the **first publish after container start** and never closes on its own.
+
+- Before the first publish, supervisors sit `idle`. Filler never runs — it would
+  start a broadcast the operator never asked for.
+- After it, a publisher gap is covered by filler indefinitely. There is no
+  timeout and no automatic cutoff.
+- Ending a broadcast is deliberate and manual: `docker restart croccante`, which
+  wipes the state directory and therefore the session.
+
+A control surface for ending a broadcast without SSH is future work.
+
+### Measured behaviour
+
+Filler is a separate ffmpeg invocation from the live relay, so each transition
+costs one RTMP reconnect at each destination. Whether that mattered was settled
+by measurement rather than argument, against a real YouTube broadcast:
+
+| Transition        | Outbound gap |
+|-------------------|--------------|
+| live → filler     | 0.18s        |
+| filler → live     | 2.40s        |
+
+A single continuous YouTube broadcast survived both transitions and a
+five-minute publisher gap, still reporting one uninterrupted stream afterwards.
+
+The alternative — one persistent ffmpeg per destination fed through a FIFO, so
+the outbound connection never closes at all — would eliminate the reconnect
+entirely but re-architects the fan-out path from pull to push. The measurements
+above say it is not needed. Revisit only if a destination is found that does not
+tolerate a sub-three-second reconnect.
+
+`test/smoke.sh` measures this gap on every run and fails above five seconds, so
+a regression that lengthens a transition is caught rather than discovered live.

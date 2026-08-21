@@ -52,6 +52,9 @@ fi
 atomic_write "$STATE_DIR/dest.count" "$DEST_COUNT"
 log "$DEST_COUNT destination(s) configured"
 
+# ── Build the filler asset once, before any supervisor can need it ──────────
+/usr/local/bin/make-filler.sh
+
 # ── Start one supervisor per destination ─────────────────────────────────────
 i=1
 while [ "$i" -le "$DEST_COUNT" ]; do

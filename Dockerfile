@@ -14,12 +14,13 @@ RUN apk add --no-cache \
 COPY nginx.conf        /etc/nginx/nginx.conf
 COPY relay-lib.sh      /usr/local/bin/relay-lib.sh
 COPY relay-dest.sh     /usr/local/bin/relay-dest.sh
+COPY make-filler.sh    /usr/local/bin/make-filler.sh
 COPY relay-start.sh    /usr/local/bin/relay-start.sh
 COPY relay-stop.sh     /usr/local/bin/relay-stop.sh
 COPY healthcheck.sh    /usr/local/bin/healthcheck.sh
 COPY entrypoint.sh     /entrypoint.sh
 
-RUN chmod +x /entrypoint.sh /usr/local/bin/relay-*.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /entrypoint.sh /usr/local/bin/relay-*.sh /usr/local/bin/make-filler.sh /usr/local/bin/healthcheck.sh
 
 EXPOSE 1935
 
