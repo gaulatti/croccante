@@ -3,23 +3,32 @@ name: Build → GHCR → Deploy
 on:
   push:
     branches: [main]
-  workflow_dispatch:   # allow manual triggers
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
   IMAGE:    ghcr.io/${{ github.repository }}
 
 jobs:
-  # ── 1. Build & push image to GHCR ─────────────────────────────────────────
+  # ── 1. Verify the relay actually works before shipping it ─────────────────
+  smoke:
+    name: Smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run smoke harness
+        run: ./test/smoke.sh
+
+  # ── 2. Build & push image to GHCR ─────────────────────────────────────────
   build:
     name: Build & push
+    needs: smoke
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
-    outputs:
-      digest: ${{ steps.push.outputs.digest }}
 
     steps:
       - name: Checkout
@@ -36,7 +45,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -47,43 +55,74 @@ jobs:
           cache-from: type=gha
           cache-to:   type=gha,mode=max
 
-  # ── 2. Deploy to server via SSH ────────────────────────────────────────────
+  # ── 3. Deploy to server via SSH ────────────────────────────────────────────
   deploy:
     name: Deploy
     needs: build
     runs-on: ubuntu-latest
-    environment: production   # optional: require manual approval in GitHub
+    # Configure this environment in repo settings to gate deploys behind a
+    # manual approval. Deploying interrupts a live broadcast for a few seconds.
+    environment: production
+    permissions:
+      contents: read
+      packages: read
 
     steps:
-      - name: SSH → pull → stop → rm → run
+      - name: SSH → pull → swap → verify
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          # The job's own short-lived token. No long-lived PAT is stored on the
+          # server: this is valid only for the duration of this run, and the
+          # login is dropped again before the step ends.
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER:  ${{ github.repository_owner }}
+          IMAGE_REF:  ${{ env.IMAGE }}:${{ github.sha }}
+          IMAGE_LATEST: ${{ env.IMAGE }}:latest
         with:
-          host:       ${{ secrets.SERVER_HOST }}
-          username:   ${{ secrets.SERVER_USER }}
-          key:        ${{ secrets.SERVER_SSH_KEY }}
+          host:        ${{ secrets.SERVER_HOST }}
+          username:    ${{ secrets.SERVER_USER }}
+          key:         ${{ secrets.SERVER_SSH_KEY }}
           fingerprint: ${{ secrets.SERVER_SSH_FINGERPRINT }}
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE_REF,IMAGE_LATEST
           script: |
             set -eu
 
-            # Log in to GHCR on the server using a PAT stored as a server-side
-            # env var (or pass it via secrets.GHCR_PAT if preferred).
-            echo "${{ secrets.GHCR_PAT }}" \
-              | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            cleanup() { docker logout ghcr.io >/dev/null 2>&1 || true; }
+            trap cleanup EXIT
 
-            # Pull the exact image built by this run
-            docker pull ${{ env.IMAGE }}:${{ github.sha }}
-            docker tag  ${{ env.IMAGE }}:${{ github.sha }} \
-                        ${{ env.IMAGE }}:latest
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
-            # Hot-switch: stop and remove the old container, start the new one
-            docker stop croccante || true
-            docker rm   croccante || true
+            # Pull BEFORE stopping anything. The download is the slow part; doing
+            # it first keeps the interruption to the container swap alone.
+            docker pull "$IMAGE_REF"
+            docker tag  "$IMAGE_REF" "$IMAGE_LATEST"
+
+            # ── The only window in which the stream is actually down ─────────
+            START=$(date +%s%3N)
+            docker stop croccante >/dev/null 2>&1 || true
+            docker rm   croccante >/dev/null 2>&1 || true
             docker run -d \
               --name croccante \
               --restart unless-stopped \
               --env-file /opt/croccante/.env \
               -p 127.0.0.1:1935:1935 \
-              ${{ env.IMAGE }}:latest
+              "$IMAGE_REF" >/dev/null
+            END=$(date +%s%3N)
+            echo "::notice::Stream interruption window: $((END - START)) ms"
 
-            # Remove dangling images to keep the host tidy
-            docker image prune -f
+            # Fail the deploy if the new container is not actually healthy.
+            echo "Waiting for health..."
+            for i in $(seq 1 30); do
+              status=$(docker inspect -f '{{.State.Health.Status}}' croccante 2>/dev/null || echo starting)
+              [ "$status" = "healthy" ] && { echo "healthy after ${i}s"; break; }
+              if [ "$status" = "unhealthy" ]; then
+                echo "container reported unhealthy:"
+                docker logs --tail 50 croccante
+                exit 1
+              fi
+              sleep 1
+            done
+            [ "$(docker inspect -f '{{.State.Health.Status}}' croccante)" = "healthy" ] || {
+              echo "container never became healthy:"; docker logs --tail 50 croccante; exit 1; }
+
+            docker image prune -f >/dev/null

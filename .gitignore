@@ -7,5 +7,8 @@
 *.swp
 *.swo
 
-# Generated nginx config (rendered from template at container start)
-nginx.conf
+# Smoke-harness scratch output
+test/.out/
+
+# Wiki checkout (managed separately, see AGENTS.md)
+/wiki/

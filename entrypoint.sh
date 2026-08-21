@@ -1,32 +1,65 @@
 #!/bin/sh
+# Container entrypoint: resolve destinations, start one supervisor each,
+# then hand PID 1 to nginx.
 set -eu
 
-# ── Validate required environment variables ───────────────────────────────────
-MISSING=""
-for VAR in YOUTUBE_STREAM_KEY TWITCH_STREAM_KEY FACEBOOK_STREAM_KEY; do
-    eval "VAL=\${${VAR}:-}"
-    if [ -z "$VAL" ]; then
-        MISSING="${MISSING} ${VAR}"
+. /usr/local/bin/relay-lib.sh
+LOG_TAG=entrypoint
+
+MAX_SLOTS="${RELAY_MAX_SLOTS:-20}"
+
+# Fresh state on every start. A previous unclean stop must not leave a stale
+# "publisher is live" marker behind.
+rm -rf "$STATE_DIR"
+mkdir -p "$HOOK_DIR"
+
+# The exec_publish hooks run as the nginx worker user, so they need a directory
+# they can write. Everything else stays root-owned. Getting this wrong makes the
+# hooks fail silently, because nginx discards their output.
+chown nginx:nginx "$HOOK_DIR"
+chmod 0775 "$HOOK_DIR"
+: > "$HOOK_LOG"
+chown nginx:nginx "$HOOK_LOG"
+
+# nginx throws away exec_publish stdout. Surface the hook log on the container's
+# stdout so publisher connect/disconnect is visible in `docker logs`.
+tail -F "$HOOK_LOG" 2>/dev/null &
+
+# ── Resolve destinations ─────────────────────────────────────────────────────
+# RELAY_DEST_1 … RELAY_DEST_<MAX_SLOTS>. Empty and absent slots are skipped;
+# slot numbers need not be contiguous. Supervisors are numbered densely from 1
+# regardless of which slots were populated.
+DEST_COUNT=0
+slot=1
+while [ "$slot" -le "$MAX_SLOTS" ]; do
+    eval "URL=\${RELAY_DEST_${slot}:-}"
+    if [ -n "$URL" ]; then
+        DEST_COUNT=$((DEST_COUNT + 1))
+        atomic_write "$STATE_DIR/dest-${DEST_COUNT}.url" "$URL"
+        log "destination $DEST_COUNT (from RELAY_DEST_${slot}): $(mask_dest "$URL")"
     fi
+    slot=$((slot + 1))
 done
 
-if [ -n "$MISSING" ]; then
-    echo "ERROR: The following required environment variables are not set:${MISSING}" >&2
+if [ "$DEST_COUNT" -eq 0 ]; then
+    log "ERROR: no destinations configured."
+    log "Set at least RELAY_DEST_1 to a full URL, e.g."
+    log "  RELAY_DEST_1=rtmp://a.rtmp.youtube.com/live2/<key>"
+    log "Slots RELAY_DEST_1..${MAX_SLOTS} are scanned; raise RELAY_MAX_SLOTS for more."
     exit 1
 fi
 
-# ── Render nginx config from template ────────────────────────────────────────
-envsubst '${YOUTUBE_STREAM_KEY} ${TWITCH_STREAM_KEY} ${FACEBOOK_STREAM_KEY}' \
-    < /etc/nginx/nginx.conf.template \
-    > /etc/nginx/nginx.conf
+atomic_write "$STATE_DIR/dest.count" "$DEST_COUNT"
+log "$DEST_COUNT destination(s) configured"
 
-# ── Start stunnel in background ───────────────────────────────────────────────
-# stunnel.conf uses foreground=yes but we background the whole process here
-# so that nginx can be PID 1 for proper signal handling.
-stunnel /etc/stunnel/stunnel.conf &
-STUNNEL_PID=$!
+# ── Start one supervisor per destination ─────────────────────────────────────
+i=1
+while [ "$i" -le "$DEST_COUNT" ]; do
+    /usr/local/bin/relay-dest.sh "$i" &
+    atomic_write "$STATE_DIR/dest-${i}.wrapper.pid" "$!"
+    i=$((i + 1))
+done
 
-echo "stunnel started (pid ${STUNNEL_PID})"
-
-# ── Start nginx as PID 1 ─────────────────────────────────────────────────────
+# ── nginx takes over as the foreground process ───────────────────────────────
+log "starting nginx"
 exec nginx -g 'daemon off;'

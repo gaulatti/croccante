@@ -1,124 +1,89 @@
 # croccante
 
-Minimal nginx-rtmp relay container. Receives a single RTMP stream from OBS on port 1935 and simultaneously pushes to YouTube, Twitch, and Facebook (RTMPS via stunnel). No transcoding.
-
-## Architecture
+Minimal nginx-rtmp relay container. Receives one RTMP stream from OBS on port
+1935 and simultaneously relays it, without transcoding, to any number of
+destinations.
 
 ```
-OBS → [host:1935] → nginx-rtmp ──► rtmp://a.rtmp.youtube.com/live2/<key>
-                                ──► rtmp://live.twitch.tv/app/<key>
-                                ──► rtmp://127.0.0.1:19350/rtmp/<key>
-                                         │
-                                    stunnel (TLS)
-                                         │
-                                         ▼
-                              live-api-s.facebook.com:443 (RTMPS)
+                                   ┌─► rtmp://…   (supervisor 1 ─ ffmpeg -c copy)
+OBS ──► [host:1935] ──► nginx-rtmp ├─► rtmps://…  (supervisor 2 ─ ffmpeg -c copy)
+                                   └─► rtmp://…   (supervisor 3 ─ ffmpeg -c copy)
 ```
 
-## Server prerequisites
+Each destination gets its own long-lived supervisor process that retries
+forever with backoff, so one dead or rejecting destination never affects the
+others, and a network blip resolves itself without restarting anything.
 
-- Fedora 42, Docker + Compose plugin installed
-- Existing nginx edge proxy handles TLS — croccante only needs port 1935
-- The deploy directory lives at `/opt/croccante`
+## Configuring destinations
 
-## First-time server setup
+Destinations are a flat list of **full URLs** — `RELAY_DEST_1` … `RELAY_DEST_20`.
+There is no per-platform configuration: anything ffmpeg can write FLV to works.
 
 ```bash
-# 1. Create the deployment directory
-sudo mkdir -p /opt/croccante
-sudo chown $USER /opt/croccante
-
-# 2. Copy docker-compose.yml onto the server
-scp docker-compose.yml user@server:/opt/croccante/
-
-# 3. Create the .env file with real stream keys (never committed to git)
-cp .env.example /opt/croccante/.env
-$EDITOR /opt/croccante/.env
-
-# 4. Authenticate Docker to GHCR (one-time; use a PAT with read:packages)
-echo "<ghcr-pat>" | docker login ghcr.io -u <github-username> --password-stdin
-
-# 5. Pull and start
-cd /opt/croccante
-docker compose up -d
+RELAY_DEST_1=rtmp://a.rtmp.youtube.com/live2/<key>
+RELAY_DEST_2=rtmp://10.0.0.5:1935/live/mystream
+RELAY_DEST_3=rtmps://live-api-s.facebook.com:443/rtmp/<key>
 ```
+
+Empty and absent slots are skipped, and slot numbers need not be contiguous.
+The container refuses to start if no destination is configured.
+
+RTMPS is handled natively by ffmpeg — there is no stunnel sidecar. See
+[docs/architecture.md](docs/architecture.md) for why.
+
+See [.env.example](.env.example) for the full set of tuning variables.
 
 ## OBS settings
 
-| Field        | Value                          |
-|--------------|--------------------------------|
-| Service      | Custom                         |
-| Server       | `rtmp://<server-ip>:1935/live` |
-| Stream key   | anything (e.g. `stream`)       |
+| Field      | Value                          |
+|------------|--------------------------------|
+| Service    | Custom                         |
+| Server     | `rtmp://<server-ip>:1935/live` |
+| Stream key | anything (e.g. `stream`)       |
 
-## CI/CD (GitHub Actions)
+## Running it
 
-Push to `main` → build image → push to GHCR → SSH into server → pull → hot-switch.
+Server setup, deployment, and key rotation live in
+[docs/operations.md](docs/operations.md).
 
-### Required GitHub secrets
-
-| Secret                   | Description                                     |
-|--------------------------|-------------------------------------------------|
-| `SERVER_HOST`            | Server IP or hostname                           |
-| `SERVER_USER`            | SSH user                                        |
-| `SERVER_SSH_KEY`         | Private SSH key (no passphrase)                 |
-| `SERVER_SSH_FINGERPRINT` | Server host key fingerprint (`ssh-keyscan`)     |
-| `GHCR_PAT`               | GitHub PAT with `read:packages` scope           |
+Locally:
 
 ```bash
-# Get the fingerprint to paste into SERVER_SSH_FINGERPRINT
-ssh-keyscan -t ed25519 <server-ip>
-```
-
-### Deployment directory on server
-
-The workflow `cd /opt/croccante` and runs `docker compose up`. Keep `docker-compose.yml` and `.env` there. The workflow does **not** push these files — manage them manually or via a separate secrets manager.
-
-## Local dev / smoke test
-
-```bash
-# Build locally
 docker build -t croccante:dev .
-
-# Run with dummy keys (stunnel will fail to connect — that's fine for local)
-docker run --rm -p 1935:1935 \
-  -e YOUTUBE_STREAM_KEY=test \
-  -e TWITCH_STREAM_KEY=test \
-  -e FACEBOOK_STREAM_KEY=test \
-  croccante:dev
-
-# Verify RTMP port is up
-nc -z localhost 1935 && echo "OK"
+docker run --rm -p 1935:1935 --env-file .env croccante:dev
 ```
+
+## Tests
+
+```bash
+./test/smoke.sh
+```
+
+Brings up local RTMP and RTMPS sinks, runs the relay against them, and asserts
+on actual relayed bytes. Needs Docker. Touches no real platform account and no
+real stream key. Also runs in CI on every push.
+
+## What this does not do
+
+Relaying stops when the publisher disconnects. If OBS drops mid-broadcast — a
+WiFi gap, a captive portal — the outbound legs drop with it and the platform
+may end the broadcast. Surviving that gap is
+[G-178](https://linear.app/gaulatti/issue/G-178), not this.
 
 ## File map
 
 ```
 croccante/
-├── Dockerfile              # Alpine + nginx-mod-rtmp + stunnel
-├── nginx.conf.template     # RTMP relay config; vars substituted at startup
-├── stunnel.conf            # RTMP→RTMPS proxy for Facebook
-├── entrypoint.sh           # Renders config, starts stunnel, execs nginx
-├── docker-compose.yml      # Production compose file
-├── .env.example            # Stream key template (copy → .env on server)
-└── .github/
-    └── workflows/
-        └── deploy.yml      # Build → GHCR → SSH hot-switch
+├── Dockerfile           # Alpine + nginx-mod-rtmp + ffmpeg
+├── nginx.conf           # RTMP ingest + loopback stat endpoint (static, not templated)
+├── entrypoint.sh        # Resolves destinations, starts supervisors, execs nginx
+├── relay-dest.sh        # One supervisor per destination: relay, retry, back off
+├── relay-start.sh       # nginx exec_publish hook   — records the live stream name
+├── relay-stop.sh        # nginx exec_publish_done   — clears it
+├── relay-lib.sh         # Shared helpers (masking, atomic writes, pid checks)
+├── healthcheck.sh       # Relay-aware container healthcheck
+├── .env.example         # Destination template — copy to .env, never commit
+├── docs/                # Architecture and operations (destined for the wiki)
+├── test/smoke.sh        # End-to-end harness against local sinks
+└── .github/workflows/deploy.yml
 ```
-
-## Updating stream keys
-
-Stream keys live only in `/opt/croccante/.env` on the server. To change them:
-
-```bash
-ssh user@server
-$EDITOR /opt/croccante/.env
-cd /opt/croccante
-docker compose up -d --force-recreate croccante
-```
-
-No image rebuild needed — keys are injected at container start via `env_file`.
-
-## Facebook RTMPS note
-
-Facebook requires RTMPS (RTMP over TLS). Inside the container, stunnel listens on `127.0.0.1:19350` and wraps outbound traffic in TLS before forwarding to `live-api-s.facebook.com:443`. nginx pushes plain RTMP to stunnel's local port. No certificates to manage — stunnel uses the system CA bundle to verify Facebook's server certificate.
