@@ -3,6 +3,9 @@ name: Build → GHCR → Deploy
 on:
   push:
     branches: [main]
+  # Run the smoke harness on PRs too. Build and deploy stay off — see the
+  # guards on those jobs.
+  pull_request:
   workflow_dispatch:
 
 env:
@@ -25,6 +28,7 @@ jobs:
   build:
     name: Build & push
     needs: smoke
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -59,6 +63,7 @@ jobs:
   deploy:
     name: Deploy
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # Configure this environment in repo settings to gate deploys behind a
     # manual approval. Deploying interrupts a live broadcast for a few seconds.
