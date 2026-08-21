@@ -80,6 +80,18 @@ A restart interrupts a live broadcast. Rotate between streams.
 Moving keys off this file and into a secrets manager is
 [G-180](https://linear.app/gaulatti/issue/G-180).
 
+## Ending a broadcast
+
+Filler runs for as long as a publisher is missing and never stops on its own.
+Ending a broadcast is therefore a deliberate act:
+
+```bash
+docker restart croccante
+```
+
+That wipes the state directory, which ends the session. Until the next publish
+the container sits idle and pushes nothing.
+
 ## Diagnosing
 
 ```bash
@@ -105,6 +117,8 @@ to paste.
 
 | Symptom | Likely cause |
 |---------|--------------|
+| Stuck showing black on the platform | The publisher is gone and filler is covering it. Check `docker logs` for `publisher gone; filling`. |
+| Filler never engages | No publish has happened since container start, so no session is open. Filler only covers gaps inside a session. |
 | One destination in `backoff`, others fine | Bad or revoked key, or that platform is refusing the connection. Check the URL. |
 | All destinations `backoff` | Server lost egress, or the publisher is sending something no destination accepts. |
 | `nginx reports N publisher(s) but no publisher marker` | The `exec_publish` hook cannot write its state directory. Check ownership of `/run/croccante/hooks`. |

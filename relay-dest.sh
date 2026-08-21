@@ -6,8 +6,10 @@
 # is ever baked into a generated script or passed on the command line.
 #
 # Lifecycle:
-#   idle      — no publisher connected; nothing is pushed
+#   idle      — no session yet; nothing is pushed
 #   relaying  — publisher live; ffmpeg copies the stream to this destination
+#   filler    — session open but publisher gone; the pre-encoded filler asset
+#               is looped to this destination so the outbound leg never starves
 #   backoff   — the last relay attempt failed; waiting before retrying
 #
 # The loop never exits. A publisher gap, a dead network, or a rejecting
@@ -52,33 +54,56 @@ log "supervisor up, destination: $MASKED"
 set_state idle
 
 while true; do
-    if [ ! -f "$PUBLISHER_FILE" ]; then
+    STREAM=""
+    if [ -f "$PUBLISHER_FILE" ]; then
+        STREAM=$(cat "$PUBLISHER_FILE" 2>/dev/null)
+    fi
+
+    if [ -z "${STREAM:-}" ] && [ ! -f "$SESSION_FILE" ]; then
+        # No publisher has ever connected. Pushing filler here would start a
+        # broadcast the operator never asked for.
         set_state idle
         sleep 1
         continue
     fi
 
-    STREAM=$(cat "$PUBLISHER_FILE" 2>/dev/null)
-    if [ -z "${STREAM:-}" ]; then
-        sleep 1
-        continue
+    if [ -n "${STREAM:-}" ]; then
+        MODE=relaying
+        SRC="rtmp://127.0.0.1:1935/$RTMP_APP/$STREAM"
+        log "relaying $SRC -> $MASKED"
+    else
+        MODE=filler
+        SRC="$FILLER_FILE"
+        log "publisher gone; filling -> $MASKED"
     fi
-
-    SRC="rtmp://127.0.0.1:1935/$RTMP_APP/$STREAM"
-    log "relaying $SRC -> $MASKED"
-    set_state relaying
+    set_state "$MODE"
 
     started=$(date +%s)
 
     # -c copy: no transcoding on the fan-out path.
     # -rw_timeout: bounds a stalled socket. (-stimeout is RTSP-only and was
     # removed in ffmpeg 6; using it here made the relay fail to start at all.)
-    ffmpeg -hide_banner -loglevel warning \
-        -rw_timeout "$RW_TIMEOUT" \
-        -i "$SRC" \
-        -c copy \
-        -rw_timeout "$RW_TIMEOUT" \
-        -f flv "$DST" &
+    # Both modes are -c copy. Filler was encoded once by make-filler.sh at the
+    # configured broadcast profile, so no encoder runs per destination and a
+    # destination sees identical parameters across live/filler transitions.
+    if [ "$MODE" = filler ]; then
+        # -re paces the file at realtime; without it ffmpeg would blast the
+        # whole loop at the destination as fast as the socket accepts it.
+        # +genpts keeps timestamps monotonic across loop wraps.
+        ffmpeg -hide_banner -loglevel warning \
+            -re -stream_loop -1 -fflags +genpts \
+            -i "$SRC" \
+            -c copy \
+            -rw_timeout "$RW_TIMEOUT" \
+            -f flv "$DST" &
+    else
+        ffmpeg -hide_banner -loglevel warning \
+            -rw_timeout "$RW_TIMEOUT" \
+            -i "$SRC" \
+            -c copy \
+            -rw_timeout "$RW_TIMEOUT" \
+            -f flv "$DST" &
+    fi
     ff=$!
     atomic_write "$FFMPEG_PID_FILE" "$ff"
 
@@ -89,9 +114,16 @@ while true; do
     # signal it. Nor should it be left to -rw_timeout, which would take the
     # full timeout to notice. The supervisor owns its own child, so it does
     # the teardown itself.
+    # Tear the current mode down as soon as the world changes under it: in
+    # relaying that means the publisher vanished, in filler it means the
+    # publisher came back and we must stop pushing black frames over them.
     (
         while kill -0 "$ff" 2>/dev/null; do
-            [ -f "$PUBLISHER_FILE" ] || { kill "$ff" 2>/dev/null; break; }
+            if [ "$MODE" = filler ]; then
+                [ -f "$PUBLISHER_FILE" ] && { kill "$ff" 2>/dev/null; break; }
+            else
+                [ -f "$PUBLISHER_FILE" ] || { kill "$ff" 2>/dev/null; break; }
+            fi
             sleep 1
         done
     ) &
@@ -105,11 +137,17 @@ while true; do
 
     elapsed=$(( $(date +%s) - started ))
 
-    if [ ! -f "$PUBLISHER_FILE" ]; then
-        # Publisher went away. Expected end of a session, not a failure.
-        log "publisher gone after ${elapsed}s; back to idle"
+    if [ "$MODE" = relaying ] && [ ! -f "$PUBLISHER_FILE" ]; then
+        # Expected: the publisher dropped. The next iteration picks up filler.
+        log "live relay ended after ${elapsed}s; switching to filler"
         backoff=1
-        set_state idle
+        continue
+    fi
+
+    if [ "$MODE" = filler ] && [ -f "$PUBLISHER_FILE" ]; then
+        # Expected: the publisher returned.
+        log "filler ended after ${elapsed}s; switching to live"
+        backoff=1
         continue
     fi
 
