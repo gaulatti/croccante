@@ -1,12 +1,12 @@
 # croccante
 
-Minimal nginx-rtmp relay container. Receives one RTMP stream from OBS on port
-1935 and simultaneously relays it, without transcoding, to any number of
-destinations.
+Minimal nginx-rtmp relay container. Receives one RTMP program stream on port
+1935 and, only after an authenticated Start command, relays it without
+transcoding to any number of destinations.
 
 ```
                                    ┌─► rtmp://…   (supervisor 1 ─ ffmpeg -c copy)
-OBS ──► [host:1935] ──► nginx-rtmp ├─► rtmps://…  (supervisor 2 ─ ffmpeg -c copy)
+Alana ─► [host:1935] ─► nginx-rtmp ├─► rtmps://…  (supervisor 2 ─ ffmpeg -c copy)
                                    └─► rtmp://…   (supervisor 3 ─ ffmpeg -c copy)
 ```
 
@@ -28,12 +28,29 @@ RELAY_DEST_3=rtmps://live-api-s.facebook.com:443/rtmp/<key>
 Empty and absent slots are skipped, and slot numbers need not be contiguous.
 The container refuses to start if no destination is configured.
 
+## Explicit broadcast lifecycle
+
+One Croccante runtime serves one required `PROGRAM_ID`. Its control API listens
+on port 8081 and must stay on the private `broadcast-control` Docker network.
+It requires a bearer token mounted at `CONTROL_TOKEN_FILE`; the token is never
+accepted on the command line or returned by the API.
+
+An RTMP publisher may connect while Croccante is stopped, but public
+destinations remain disconnected until Alana sends an authenticated Start.
+Start and Stop require both an `Idempotency-Key` and a monotonically increasing
+`X-Command-Sequence`. Stop ends every public output without restarting the
+container. Publisher loss during a started session invokes filler and never
+implies Stop.
+
+The machine contract and example requests are documented in
+[docs/operations.md](docs/operations.md#lifecycle-control-api).
+
 RTMPS is handled natively by ffmpeg — there is no stunnel sidecar. See
 [docs/architecture.md](docs/architecture.md) for why.
 
 See [.env.example](.env.example) for the full set of tuning variables.
 
-## OBS settings
+## Publisher settings
 
 | Field      | Value                          |
 |------------|--------------------------------|
@@ -50,7 +67,9 @@ Locally:
 
 ```bash
 docker build -t croccante:dev .
-docker run --rm -p 1935:1935 --env-file .env croccante:dev
+docker run --rm -p 1935:1935 --env-file .env \
+  --mount type=bind,src="$PWD/control-token",dst=/run/secrets/croccante-control-token,readonly \
+  croccante:dev
 ```
 
 ## Tests
@@ -60,15 +79,9 @@ docker run --rm -p 1935:1935 --env-file .env croccante:dev
 ```
 
 Brings up local RTMP and RTMPS sinks, runs the relay against them, and asserts
-on actual relayed bytes. Needs Docker. Touches no real platform account and no
-real stream key. Also runs in CI on every push.
-
-## What this does not do
-
-Relaying stops when the publisher disconnects. If OBS drops mid-broadcast — a
-WiFi gap, a captive portal — the outbound legs drop with it and the platform
-may end the broadcast. Surviving that gap is
-[G-178](https://linear.app/gaulatti/issue/G-178), not this.
+on actual relayed bytes plus authenticated lifecycle behavior. Needs Docker.
+Touches no real platform account and no real stream key. Also runs in CI on
+every push.
 
 ## File map
 
@@ -82,6 +95,7 @@ croccante/
 ├── relay-stop.sh        # nginx exec_publish_done   — clears it
 ├── relay-lib.sh         # Shared helpers (masking, atomic writes, pid checks)
 ├── healthcheck.sh       # Relay-aware container healthcheck
+├── control-server.py    # Authenticated, program-scoped Start/Stop/state API
 ├── .env.example         # Destination template — copy to .env, never commit
 ├── docs/                # Architecture and operations (destined for the wiki)
 ├── test/smoke.sh        # End-to-end harness against local sinks

@@ -14,6 +14,10 @@ sudo chown $USER /opt/croccante
 cp .env.example /opt/croccante/.env
 chmod 600 /opt/croccante/.env
 $EDITOR /opt/croccante/.env
+
+# Independent machine credential used only by Alana. Transfer it through the
+# approved secret channel; do not paste it into shell history or .env.
+install -m 600 /secure/input/croccante-control-token /opt/croccante/control-token
 ```
 
 No manual `docker login` is needed on the server. The deploy workflow logs in
@@ -80,17 +84,40 @@ A restart interrupts a live broadcast. Rotate between streams.
 Moving keys off this file and into a secrets manager is
 [G-180](https://linear.app/gaulatti/issue/G-180).
 
-## Ending a broadcast
+## Lifecycle control API
 
-Filler runs for as long as a publisher is missing and never stops on its own.
-Ending a broadcast is therefore a deliberate act:
+The API is reachable as `http://croccante:8081` only from containers attached
+to the private `broadcast-control` network. Do not publish this port publicly.
+Alana supplies the mounted bearer token and the exact configured program ID.
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `GET /v1/programs/{programId}/session` | Authoritative requested/actual state, session timestamps, publisher presence, mode, destination health, and last command result. |
+| `POST /v1/programs/{programId}/session/start` | Open or idempotently retain the session. |
+| `POST /v1/programs/{programId}/session/stop` | End all public destination sessions and return to idle. |
+
+Both POST routes require `Idempotency-Key` and a positive,
+monotonically increasing `X-Command-Sequence`. Reusing a key returns its stored
+result without applying the command again. A sequence older than or equal to a
+different accepted command returns `409`, so a delayed Start cannot undo a
+newer Stop.
+
+Example from an authorized container on the private network (read the token
+into the request without printing it):
 
 ```bash
-docker restart croccante
+curl --fail-with-body \
+  -H "Authorization: Bearer $(< /run/secrets/croccante-control-token)" \
+  -H 'Idempotency-Key: alana-command-123' \
+  -H 'X-Command-Sequence: 123' \
+  -X POST \
+  http://croccante:8081/v1/programs/example-program/session/start
 ```
 
-That wipes the state directory, which ends the session. Until the next publish
-the container sits idle and pushes nothing.
+Filler continues for a missing publisher until explicit Stop. If Alana or the
+control route becomes unavailable, Croccante keeps the last accepted state.
+Manual recovery uses the same API with a new idempotency key and sequence; a
+container restart is an emergency reset that returns the runtime to stopped.
 
 ## Diagnosing
 
@@ -118,7 +145,10 @@ to paste.
 | Symptom | Likely cause |
 |---------|--------------|
 | Stuck showing black on the platform | The publisher is gone and filler is covering it. Check `docker logs` for `publisher gone; filling`. |
-| Filler never engages | No publish has happened since container start, so no session is open. Filler only covers gaps inside a session. |
+| Filler never engages | No publish has happened since the current explicit Start. Filler only covers gaps after live media has appeared in that session. |
+| Publisher connected but destinations remain idle | The session is explicitly stopped. Inspect the lifecycle API and have Alana issue Start. |
+| API returns `401` | Alana's mounted token does not match Croccante's control-token file. Rotate both sides through the approved secret path. |
+| API returns `409` | The command sequence is stale or reordered. Read state and retry only the intended newer command with a higher sequence. |
 | One destination in `backoff`, others fine | Bad or revoked key, or that platform is refusing the connection. Check the URL. |
 | All destinations `backoff` | Server lost egress, or the publisher is sending something no destination accepts. |
 | `nginx reports N publisher(s) but no publisher marker` | The `exec_publish` hook cannot write its state directory. Check ownership of `/run/croccante/hooks`. |
@@ -131,9 +161,10 @@ to paste.
 ./test/smoke.sh
 ```
 
-18 checks against local RTMP and RTMPS sinks: fan-out, RTMPS, destination
-isolation, backoff, key masking, disconnect/reconnect, restart under load, and
-that the healthcheck can both pass and fail. No real platform account involved.
+More than 50 checks against local RTMP and RTMPS sinks: private authentication, explicit
+Start/Stop, idempotency and ordering, fan-out, RTMPS, destination isolation,
+filler recovery, restart, control-plane loss, key masking, and health failure
+detection. No real platform account is involved.
 
 Manual verification against a real YouTube broadcast is still required before
 trusting a change in production — the harness proves the relay mechanics, not

@@ -1,6 +1,7 @@
 #!/bin/sh
-# Healthy means: nginx is accepting RTMP, every destination supervisor is
-# alive, and no supervisor is asleep at the wheel while a publisher is live.
+# Healthy means: nginx and the lifecycle controller are accepting work, every
+# destination supervisor is alive, and its state agrees with the explicit
+# requested session state.
 #
 # A supervisor legitimately sits in "idle" (no publisher) or "backoff" (the
 # destination is rejecting us). Neither is unhealthy on its own. What is
@@ -11,6 +12,7 @@ set -u
 . /usr/local/bin/relay-lib.sh
 
 nc -z 127.0.0.1 1935 || { echo "nginx not accepting on 1935"; exit 1; }
+pid_alive "$STATE_DIR/control.pid" || { echo "lifecycle control server is dead"; exit 1; }
 
 COUNT=$(cat "$STATE_DIR/dest.count" 2>/dev/null) || { echo "no destination count"; exit 1; }
 
@@ -21,6 +23,12 @@ if [ -f "$PUBLISHER_FILE" ]; then
     _since=$(stat -c %Y "$PUBLISHER_FILE" 2>/dev/null || echo 0)
     PUBLISHER_AGE=$(( $(date +%s) - _since ))
 fi
+
+REQUESTED_STATE=$(cat "$REQUESTED_STATE_FILE" 2>/dev/null) || { echo "no requested session state"; exit 1; }
+case "$REQUESTED_STATE" in
+    started|stopped) ;;
+    *) echo "invalid requested session state"; exit 1 ;;
+esac
 
 # nginx is the authority on whether a stream is actually arriving. If it sees a
 # publisher and we do not, the exec_publish hook is broken — a failure mode that
@@ -37,16 +45,24 @@ while [ "$i" -le "$COUNT" ]; do
 
     state=$(cat "$STATE_DIR/dest-$i.state" 2>/dev/null || echo unknown)
 
-    # Supervisors poll once a second, so allow a short grace period after a
-    # publisher connects before "still idle" counts against them.
-    if [ "$PUBLISHER_LIVE" -eq 1 ] && [ "$state" = "idle" ] && [ "$PUBLISHER_AGE" -gt 5 ]; then
-        echo "supervisor $i idle while a publisher is live"
-        exit 1
+    if [ "$REQUESTED_STATE" = "stopped" ]; then
+        if [ "$state" != "idle" ] || pid_alive "$STATE_DIR/dest-$i.ffmpeg.pid"; then
+            echo "supervisor $i is not idle while the session is stopped"
+            exit 1
+        fi
+        i=$((i + 1))
+        continue
     fi
 
-    # Inside a session, idle means the destination is being fed nothing at all.
-    if [ -f "$SESSION_FILE" ] && [ "$state" = "idle" ]; then
-        echo "supervisor $i idle during an open broadcast session"
+    # Started before the first publisher is a healthy waiting state and must
+    # not connect a destination. Once media has appeared, idle/waiting would
+    # starve the explicitly active session.
+    if [ ! -f "$PUBLISHER_SEEN_FILE" ] && [ "$state" = "waiting" ]; then
+        i=$((i + 1))
+        continue
+    fi
+    if [ "$state" = "idle" ] || [ "$state" = "waiting" ]; then
+        echo "supervisor $i is $state during an active media session"
         exit 1
     fi
 
@@ -65,4 +81,4 @@ while [ "$i" -le "$COUNT" ]; do
     i=$((i + 1))
 done
 
-echo "ok: nginx up, $COUNT supervisor(s) healthy, publisher_live=$PUBLISHER_LIVE, nginx_publishers=${NGINX_PUBLISHERS:-0}"
+echo "ok: requested_state=$REQUESTED_STATE, nginx up, control up, $COUNT supervisor(s) healthy, publisher_live=$PUBLISHER_LIVE, nginx_publishers=${NGINX_PUBLISHERS:-0}"

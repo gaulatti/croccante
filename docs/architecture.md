@@ -4,7 +4,7 @@
 
 ```
                                    ┌─► destination 1
-OBS ──► nginx-rtmp (app "live") ───├─► destination 2
+Alana ─► nginx-rtmp (app "live") ──├─► destination 2
          │                         └─► destination 3
          │  exec_publish / exec_publish_done
          ▼
@@ -27,7 +27,8 @@ destination that the healthcheck can reason about.
 
 | State      | Meaning                                                        |
 |------------|----------------------------------------------------------------|
-| `idle`     | No broadcast session yet. Nothing is being pushed.             |
+| `idle`     | Explicitly stopped. Nothing is being pushed.                    |
+| `waiting`  | Started, but no publisher has arrived in this session.          |
 | `relaying` | Publisher live; ffmpeg is copying the stream to this destination. |
 | `filler`   | Session open but publisher gone; the filler asset is looped out. |
 | `backoff`  | The last attempt failed. Waiting before retrying.              |
@@ -37,7 +38,8 @@ for 30 seconds or more is treated as a transient drop and reconnects
 immediately rather than backing off — only fast, repeated failures are
 throttled.
 
-A publisher disconnect is not a failure. Supervisors return to `idle` and wait.
+A publisher disconnect is not Stop. After live media has appeared in an active
+session, supervisors switch to filler and wait for the publisher to return.
 
 ## State directory layout
 
@@ -101,16 +103,18 @@ already supports it: run stunnel beside the container and point a
 `healthcheck.sh` reports unhealthy when:
 
 - nginx is not accepting on 1935;
+- the lifecycle control process has died;
 - any supervisor process has died;
 - **nginx reports a connected publisher but no publisher marker exists** — the
   signature of a broken `exec_publish` hook, which is otherwise invisible;
-- a supervisor still reports `idle` more than 5 seconds after a publisher
-  connected;
+- a stopped destination is not idle or still owns an ffmpeg process;
+- a started destination remains `idle`/`waiting` after live media has appeared;
 - a supervisor claims to be `relaying` but has no live ffmpeg.
 
-`idle` with no publisher, and `backoff` against a rejecting destination, are
-both healthy. The cross-check against nginx's own `rtmp_stat` (loopback only,
-port 8080) is what makes this more than a port probe.
+`idle` while stopped, `waiting` before the first publisher, and `backoff`
+against a rejecting destination are healthy. The cross-check against nginx's
+own `rtmp_stat` (loopback only, port 8080) is what makes this more than a port
+probe.
 
 ## Timing
 
@@ -139,17 +143,32 @@ things platforms drop a stream for.
 
 ### The session boundary
 
-There is no session concept in nginx, so croccante defines one: a session opens
-at the **first publish after container start** and never closes on its own.
+The authenticated control service is the only session authority. A publisher
+connection is an observation, never an implicit Start or Stop.
 
-- Before the first publish, supervisors sit `idle`. Filler never runs — it would
-  start a broadcast the operator never asked for.
-- After it, a publisher gap is covered by filler indefinitely. There is no
-  timeout and no automatic cutoff.
-- Ending a broadcast is deliberate and manual: `docker restart croccante`, which
-  wipes the state directory and therefore the session.
+- `stopped`: supervisors are `idle` and public destinations are disconnected,
+  even when an RTMP publisher is connected to nginx.
+- `started` before media: supervisors are `waiting`; filler does not start a
+  public stream before the first live frame.
+- `started` after media: publisher loss selects filler indefinitely. No timeout,
+  control-plane outage, or missing packet infers Stop.
+- explicit Stop removes the active session marker. Each supervisor kills its
+  child publisher and returns to idle within its one-second watch interval.
+- the next Start creates a fresh UUID session without restarting the container.
 
-A control surface for ending a broadcast without SSH is future work.
+The controller serializes commands, records idempotency results, and rejects a
+sequence number that is not newer than the last accepted command. This prevents
+late network delivery from reopening a session after a newer Stop.
+
+## Private control boundary
+
+`control-server.py` listens on the internal `broadcast-control` Docker network.
+The production workflow does not publish port 8081 to the host or internet.
+Every request is scoped to the configured `PROGRAM_ID` and uses a bearer token
+read from a mounted secret file. Responses expose lifecycle, publisher,
+supervisor, and per-destination mode/health state, but never destination URLs,
+stream keys, or credentials. Croccante authenticates only Alana machine calls;
+operator identity and Pompeii authorization remain upstream concerns.
 
 ### Measured behaviour
 

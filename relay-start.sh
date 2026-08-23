@@ -11,11 +11,11 @@ LOG_TO_HOOK_FILE=1
 
 log "publisher connected: stream='${1:-}'"
 
-# First publish since container start opens the broadcast session. From here on
-# a publisher gap is covered by filler rather than silence.
-if [ ! -f "$SESSION_FILE" ]; then
-    log "broadcast session started"
-    atomic_write "$SESSION_FILE" "$(date +%s)"
-fi
-
 atomic_write "$PUBLISHER_FILE" "${1:-}"
+
+# A publisher never starts a session. If an authenticated Start is already in
+# force, remember that this session has carried live media so a later gap uses
+# filler. A publisher connected while stopped remains withheld.
+if session_started; then
+    atomic_write "$PUBLISHER_SEEN_FILE" "$(date +%s)"
+fi

@@ -101,6 +101,8 @@ jobs:
             # it first keeps the interruption to the container swap alone.
             docker pull "$IMAGE_REF"
             docker tag  "$IMAGE_REF" "$IMAGE_LATEST"
+            test -s /opt/croccante/control-token
+            docker network inspect broadcast-control >/dev/null 2>&1 || docker network create broadcast-control >/dev/null
 
             # ── The only window in which the stream is actually down ─────────
             START=$(date +%s%3N)
@@ -109,7 +111,9 @@ jobs:
             docker run -d \
               --name croccante \
               --restart unless-stopped \
+              --network broadcast-control \
               --env-file /opt/croccante/.env \
+              --mount type=bind,src=/opt/croccante/control-token,dst=/run/secrets/croccante-control-token,readonly \
               -p 127.0.0.1:1935:1935 \
               "$IMAGE_REF" >/dev/null
             END=$(date +%s%3N)

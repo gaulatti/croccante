@@ -6,7 +6,8 @@
 # is ever baked into a generated script or passed on the command line.
 #
 # Lifecycle:
-#   idle      — no session yet; nothing is pushed
+#   idle      — explicitly stopped; nothing is pushed
+#   waiting   — started but no publisher has arrived in this session
 #   relaying  — publisher live; ffmpeg copies the stream to this destination
 #   filler    — session open but publisher gone; the pre-encoded filler asset
 #               is looped to this destination so the outbound leg never starves
@@ -59,10 +60,14 @@ while true; do
         STREAM=$(cat "$PUBLISHER_FILE" 2>/dev/null)
     fi
 
-    if [ -z "${STREAM:-}" ] && [ ! -f "$SESSION_FILE" ]; then
-        # No publisher has ever connected. Pushing filler here would start a
-        # broadcast the operator never asked for.
+    if ! session_started; then
         set_state idle
+        sleep 1
+        continue
+    fi
+
+    if [ -z "${STREAM:-}" ] && [ ! -f "$PUBLISHER_SEEN_FILE" ]; then
+        set_state waiting
         sleep 1
         continue
     fi
@@ -119,7 +124,10 @@ while true; do
     # publisher came back and we must stop pushing black frames over them.
     (
         while kill -0 "$ff" 2>/dev/null; do
-            if [ "$MODE" = filler ]; then
+            if ! session_started; then
+                kill "$ff" 2>/dev/null
+                break
+            elif [ "$MODE" = filler ]; then
                 [ -f "$PUBLISHER_FILE" ] && { kill "$ff" 2>/dev/null; break; }
             else
                 [ -f "$PUBLISHER_FILE" ] || { kill "$ff" 2>/dev/null; break; }
@@ -136,6 +144,13 @@ while true; do
     rm -f "$FFMPEG_PID_FILE"
 
     elapsed=$(( $(date +%s) - started ))
+
+    if ! session_started; then
+        log "session stopped; destination idle"
+        set_state idle
+        backoff=1
+        continue
+    fi
 
     if [ "$MODE" = relaying ] && [ ! -f "$PUBLISHER_FILE" ]; then
         # Expected: the publisher dropped. The next iteration picks up filler.
@@ -158,7 +173,11 @@ while true; do
     else
         log "relay failed after ${elapsed}s (rc=$rc); retrying in ${backoff}s"
         set_state "backoff"
-        sleep "$backoff"
+        slept=0
+        while [ "$slept" -lt "$backoff" ] && session_started; do
+            sleep 1
+            slept=$((slept + 1))
+        done
         backoff=$(( backoff * 2 ))
         [ "$backoff" -gt "$BACKOFF_MAX" ] && backoff="$BACKOFF_MAX"
     fi
