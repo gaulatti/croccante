@@ -11,7 +11,19 @@ MAX_SLOTS="${RELAY_MAX_SLOTS:-20}"
 # Fresh state on every start. A previous unclean stop must not leave a stale
 # "publisher is live" marker behind.
 rm -rf "$STATE_DIR"
-mkdir -p "$HOOK_DIR"
+mkdir -p "$HOOK_DIR" "$CONTROL_DIR/commands"
+
+PROGRAM_ID="${PROGRAM_ID:-}"
+CONTROL_TOKEN_FILE="${CONTROL_TOKEN_FILE:-/run/secrets/croccante-control-token}"
+if [ -z "$PROGRAM_ID" ]; then
+    log "ERROR: PROGRAM_ID is required"
+    exit 1
+fi
+if [ ! -s "$CONTROL_TOKEN_FILE" ]; then
+    log "ERROR: CONTROL_TOKEN_FILE must name a readable, non-empty secret file"
+    exit 1
+fi
+atomic_write "$REQUESTED_STATE_FILE" stopped
 
 # The exec_publish hooks run as the nginx worker user, so they need a directory
 # they can write. Everything else stays root-owned. Getting this wrong makes the
@@ -62,6 +74,11 @@ while [ "$i" -le "$DEST_COUNT" ]; do
     atomic_write "$STATE_DIR/dest-${i}.wrapper.pid" "$!"
     i=$((i + 1))
 done
+
+# The lifecycle surface is a separate process so nginx remains the RTMP PID 1.
+# It receives the token through a mounted file, never a command-line argument.
+/usr/local/bin/control-server.py &
+atomic_write "$STATE_DIR/control.pid" "$!"
 
 # ── nginx takes over as the foreground process ───────────────────────────────
 log "starting nginx"

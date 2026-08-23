@@ -14,12 +14,14 @@ PUBLISHER_FILE="$HOOK_DIR/publisher"
 # file instead. entrypoint.sh tails it onto the container's stdout.
 HOOK_LOG="$HOOK_DIR/hooks.log"
 
-# A broadcast session begins at the first publish after container start and
-# never ends on its own. Filler runs only inside a session, which is what keeps
-# it from pushing black frames at a destination before the operator has ever
-# gone live. entrypoint.sh wipes the state directory, so a restart ends the
-# session — that is the documented way to end a broadcast.
-SESSION_FILE="$HOOK_DIR/session"
+# Root-owned explicit lifecycle state. Publisher hooks may read this directory
+# but only the authenticated control server writes it.
+CONTROL_DIR="$STATE_DIR/control"
+REQUESTED_STATE_FILE="$CONTROL_DIR/requested.state"
+SESSION_FILE="$CONTROL_DIR/session.id"
+# This is an observation from nginx, not an authority command, so it belongs in
+# the nginx-writable hook directory alongside the live publisher marker.
+PUBLISHER_SEEN_FILE="$HOOK_DIR/publisher.seen"
 
 # Generated once by make-filler.sh before any supervisor starts.
 FILLER_FILE="$STATE_DIR/filler.flv"
@@ -52,6 +54,10 @@ atomic_write() {
     _dest="$1"
     _val="$2"
     printf '%s\n' "$_val" > "$_dest.tmp" && mv -f "$_dest.tmp" "$_dest"
+}
+
+session_started() {
+    [ -f "$SESSION_FILE" ] && [ "$(cat "$REQUESTED_STATE_FILE" 2>/dev/null)" = "started" ]
 }
 
 # Number of publishers nginx itself believes are connected. This is the

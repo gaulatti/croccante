@@ -11,8 +11,12 @@ set -uo pipefail
 NET=croccante-smoke
 IMAGE=${IMAGE:-croccante:dev}
 SINK_IMAGE=croccante-sink:dev
+PROGRAM_ID=croccante-smoke-program
+TEST_CONTROL_TOKEN=croccante-smoke-control-token
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
+CONTROL_SECRET_FILE=$(mktemp)
+printf '%s\n' "$TEST_CONTROL_TOKEN" > "$CONTROL_SECRET_FILE"
 
 PASS=0
 FAIL=0
@@ -33,7 +37,11 @@ cleanup() {
     docker rm -f croccante-under-test publisher sink-a sink-b sink-tls >/dev/null 2>&1
     docker network rm "$NET" >/dev/null 2>&1
 }
-trap cleanup EXIT
+finish() {
+    cleanup
+    rm -f "$CONTROL_SECRET_FILE"
+}
+trap finish EXIT
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 bold "Building images"
@@ -55,6 +63,9 @@ FAKE_KEY="abcd-efgh-ijkl-mnop-qrst"
 
 start_croccante() {
     docker run -d --name croccante-under-test --network "$NET" \
+        -e PROGRAM_ID="$PROGRAM_ID" \
+        -e CONTROL_TOKEN_FILE=/run/secrets/croccante-control-token \
+        -v "$CONTROL_SECRET_FILE:/run/secrets/croccante-control-token:ro" \
         -e RELAY_DEST_1="rtmp://sink-a:1935/live/$FAKE_KEY" \
         -e RELAY_DEST_5="rtmp://sink-b:1935/live/$FAKE_KEY" \
         -e RELAY_DEST_9="rtmps://sink-tls:443/live/$FAKE_KEY" \
@@ -62,6 +73,35 @@ start_croccante() {
         -e RELAY_BACKOFF_MAX=4 \
         "$@" "$IMAGE" >/dev/null
     sleep 2
+}
+
+control_request() { # method, action-or-state, token, key, sequence, program
+    docker exec croccante-under-test python3 -c '
+import sys, urllib.error, urllib.request
+method, action, token, key, sequence, program = sys.argv[1:]
+path = f"http://127.0.0.1:8081/v1/programs/{program}/session"
+if action != "state": path += f"/{action}"
+headers = {"Authorization": f"Bearer {token}"}
+if key: headers["Idempotency-Key"] = key
+if sequence: headers["X-Command-Sequence"] = sequence
+request = urllib.request.Request(path, data=b"" if method == "POST" else None, headers=headers, method=method)
+try:
+    response = urllib.request.urlopen(request)
+except urllib.error.HTTPError as error:
+    print(error.code)
+    print(error.read().decode())
+else:
+    print(response.status)
+    print(response.read().decode())
+' "$1" "$2" "${3:-$TEST_CONTROL_TOKEN}" "${4:-}" "${5:-}" "${6:-$PROGRAM_ID}" 2>/dev/null
+}
+
+control_command() { # start|stop, sequence, idempotency key
+    control_request POST "$1" "$TEST_CONTROL_TOKEN" "$3" "$2"
+}
+
+control_status() {
+    control_request GET state "$TEST_CONTROL_TOKEN" "" ""
 }
 
 # Publishes a synthetic stream into croccante. Runs from the croccante image
@@ -122,6 +162,14 @@ wait_for_state() { # container-state, timeout
     return 1
 }
 
+wait_for_control_mode() { # mode, timeout
+    for _ in $(seq 1 "${2:-40}"); do
+        control_status | tail -n 1 | grep -q "\"mode\":\"$1\"" && return 0
+        sleep 1
+    done
+    return 1
+}
+
 # Teardown is bounded by nginx drop_idle_publisher (10s) plus the supervisor
 # watchdog poll, so poll rather than guessing a sleep.
 wait_for_idle() {
@@ -136,17 +184,36 @@ echo
 
 # ── Test 1: refuses to start with no destinations ────────────────────────────
 bold "Test 1 — refuses to start with no destinations configured"
-out=$(docker run --rm --name croccante-nodest "$IMAGE" 2>&1); rc=$?
+out=$(docker run --rm --name croccante-nodest \
+    -e PROGRAM_ID="$PROGRAM_ID" \
+    -e CONTROL_TOKEN_FILE=/run/secrets/croccante-control-token \
+    -v "$CONTROL_SECRET_FILE:/run/secrets/croccante-control-token:ro" \
+    "$IMAGE" 2>&1); rc=$?
 check "exits non-zero" "$([ $rc -ne 0 ] && echo 0 || echo 1)" "exit code was $rc"
 echo "$out" | grep -q "no destinations configured"
 check "explains why" $? "output was: $out"
 echo
 
-# ── Test 2: fan-out to multiple destinations ─────────────────────────────────
-bold "Test 2 — fan-out to multiple simultaneous destinations"
+# ── Test 2: private explicit start ───────────────────────────────────────────
+bold "Test 2 — publisher is withheld until authenticated explicit Start"
 start_sinks
 start_croccante
+
+unauthorized=$(control_request GET state wrong-token "" "")
+check "rejects an unauthenticated state request" "$(printf '%s\n' "$unauthorized" | head -n 1 | grep -q 401 && echo 0 || echo 1)"
+wrong_program=$(control_request GET state "$TEST_CONTROL_TOKEN" "" "" wrong-program)
+check "rejects a request scoped to another program" "$(printf '%s\n' "$wrong_program" | head -n 1 | grep -q 404 && echo 0 || echo 1)"
+
 start_publisher
+sleep 4
+check "connected publisher remains idle while stopped" "$([ "$(dest_state 1)" = "idle" ] && echo 0 || echo 1)" "state was $(dest_state 1)"
+before_start=$(recorded_bytes sink-a)
+check "no destination bytes before Start (${before_start})" "$([ "${before_start:-0}" -eq 0 ] && echo 0 || echo 1)"
+
+started=$(control_command start 1 initial-start)
+check "authenticated Start is accepted" "$(printf '%s\n' "$started" | head -n 1 | grep -q 200 && echo 0 || echo 1)"
+wait_for_state relaying 30
+check "Start reaches live relay state" $? "state was $(dest_state 1)"
 sleep 12
 
 a=$(recorded_bytes sink-a); b=$(recorded_bytes sink-b); t=$(recorded_bytes sink-tls)
@@ -170,8 +237,12 @@ echo
 
 # ── Test 5: no key material in logs ──────────────────────────────────────────
 bold "Test 5 — stream keys never reach the logs"
-echo "$logs" | grep -q "$FAKE_KEY"
-check "key absent from container logs" "$([ $? -ne 0 ] && echo 0 || echo 1)" "the fake key appeared in logs"
+if echo "$logs" | grep -q "$FAKE_KEY"; then
+    key_absent=1
+else
+    key_absent=0
+fi
+check "key absent from container logs" "$key_absent" "the fake key appeared in logs"
 echo "$logs" | grep -q '/\*\*\*'
 check "destinations are logged masked" $?
 echo
@@ -227,6 +298,9 @@ docker restart croccante-under-test >/dev/null
 sleep 5
 docker rm -f publisher >/dev/null 2>&1
 start_publisher
+restarted=$(control_command start 1 restart-start)
+check "restart returns to stopped until a new Start" "$(printf '%s\n' "$restarted" | head -n 1 | grep -q 200 && echo 0 || echo 1)"
+wait_for_state relaying 30
 sleep 12
 final=$(recorded_bytes sink-a)
 check "relays recovered after restart (+$((final-after)) bytes)" "$([ "$final" -gt "$after" ] && echo 0 || echo 1)" "no new bytes after restart"
@@ -244,7 +318,15 @@ start_croccante -e FILLER_LOOP_SECONDS=6
 
 check "no filler before the first publish (state=$(dest_state 1))" "$([ "$(dest_state 1)" = "idle" ] && echo 0 || echo 1)" "filler must not run before a session opens"
 
+waiting=$(control_command start 1 filler-start)
+check "Start without a publisher is accepted" "$(printf '%s\n' "$waiting" | head -n 1 | grep -q 200 && echo 0 || echo 1)"
+wait_for_state waiting 10
+check "Start without a publisher waits without opening destinations" $? "state was $(dest_state 1)"
+wait_for_control_mode waiting-for-publisher 10
+check "control state reports waiting-for-publisher" $?
+
 start_publisher
+wait_for_state relaying 30
 sleep 8
 check "relaying once the publisher connects" "$([ "$(dest_state 1)" = "relaying" ] && echo 0 || echo 1)" "state was $(dest_state 1)"
 
@@ -292,23 +374,89 @@ check "outbound gap stays under 5s (${gap}s)" \
     "a gap this long risks the platform ending the broadcast"
 echo
 
-# ── Test 11: the healthcheck can actually fail ───────────────────────────────
+# ── Test 11: explicit stop, ordering, and fresh restart ──────────────────────
+bold "Test 11 — explicit Stop is idempotent, ordered, and reversible"
+state_before_stop=$(control_status | tail -n 1)
+session_before_stop=$(printf '%s' "$state_before_stop" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sessionId"])')
+check "state omits destination URLs and stream keys" \
+    "$(printf '%s' "$state_before_stop" | grep -qE 'rtmps?://|abcd-efgh' && echo 1 || echo 0)"
+
+stopped=$(control_command stop 2 explicit-stop)
+check "authenticated Stop is accepted" "$(printf '%s\n' "$stopped" | head -n 1 | grep -q 200 && echo 0 || echo 1)"
+wait_for_idle 10
+check "Stop reaches idle without a container restart" $? "state was $(dest_state 1)"
+procs=$(ffmpeg_procs)
+check "Stop terminates every destination publisher (${procs} procs)" "$([ "${procs:-0}" -eq 0 ] && echo 0 || echo 1)"
+wait_for_control_mode idle 10
+check "control state reports deliberate idle" $?
+
+duplicate=$(control_request POST stop "$TEST_CONTROL_TOKEN" explicit-stop 2)
+check "duplicate Stop returns the recorded idempotent result" \
+    "$(printf '%s' "$duplicate" | tail -n 1 | grep -q '"duplicate":true' && echo 0 || echo 1)"
+
+reordered=$(control_request POST start "$TEST_CONTROL_TOKEN" reordered-start 1)
+check "reordered Start is rejected" "$(printf '%s\n' "$reordered" | head -n 1 | grep -q 409 && echo 0 || echo 1)"
+check "reordered command cannot reopen destinations" "$([ "$(dest_state 1)" = "idle" ] && echo 0 || echo 1)"
+
+started_again=$(control_command start 3 fresh-start)
+check "newer Start is accepted" "$(printf '%s\n' "$started_again" | head -n 1 | grep -q 200 && echo 0 || echo 1)"
+wait_for_state relaying 30
+check "Stop followed by Start returns to live" $? "state was $(dest_state 1)"
+state_after_start=$(control_status | tail -n 1)
+session_after_start=$(printf '%s' "$state_after_start" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sessionId"])')
+check "fresh Start creates a new session identifier" "$([ "$session_before_stop" != "$session_after_start" ] && echo 0 || echo 1)"
+duplicate_start=$(control_request POST start "$TEST_CONTROL_TOKEN" fresh-start 3)
+check "duplicate Start returns the recorded idempotent result" \
+    "$(printf '%s' "$duplicate_start" | tail -n 1 | grep -q '"duplicate":true' && echo 0 || echo 1)"
+procs=$(ffmpeg_procs)
+check "duplicate Start creates no parallel publishers (${procs} procs)" "$([ "${procs:-0}" -le 4 ] && echo 0 || echo 1)"
+echo
+
+# ── Test 12: the healthcheck can actually fail ───────────────────────────────
 # A healthcheck that only ever returns "healthy" is worthless. Kill a
 # supervisor and prove the check notices.
-bold "Test 11 — healthcheck detects a dead supervisor"
+bold "Test 12 — healthcheck detects a dead supervisor"
 wpid=$(docker exec croccante-under-test cat /run/croccante/dest-1.wrapper.pid | tr -d ' \n')
 docker exec croccante-under-test kill -9 "$wpid" >/dev/null 2>&1
 sleep 2
-docker exec croccante-under-test /usr/local/bin/healthcheck.sh >/dev/null 2>&1
-check "reports unhealthy when a supervisor dies" "$([ $? -ne 0 ] && echo 0 || echo 1)" "healthcheck still reported healthy"
+if docker exec croccante-under-test /usr/local/bin/healthcheck.sh >/dev/null 2>&1; then
+    dead_supervisor_detected=1
+else
+    dead_supervisor_detected=0
+fi
+check "reports unhealthy when a supervisor dies" "$dead_supervisor_detected" "healthcheck still reported healthy"
+echo
+
+# ── Test 13: control-plane loss does not infer Stop ──────────────────────────
+bold "Test 13 — control-plane loss leaves an active broadcast running"
+docker restart croccante-under-test >/dev/null
+sleep 5
+docker rm -f publisher >/dev/null 2>&1
+start_publisher
+control_command start 1 outage-start >/dev/null
+wait_for_state relaying 30
+before_outage=$(recorded_bytes sink-a)
+control_pid=$(docker exec croccante-under-test cat /run/croccante/control.pid | tr -d ' \n')
+docker exec croccante-under-test kill -9 "$control_pid" >/dev/null 2>&1
+sleep 6
+after_outage=$(recorded_bytes sink-a)
+check "broadcast advances after the controller dies (+$((after_outage-before_outage)) bytes)" \
+    "$([ "$after_outage" -gt "$before_outage" ] && echo 0 || echo 1)"
+if docker exec croccante-under-test /usr/local/bin/healthcheck.sh >/dev/null 2>&1; then
+    dead_controller_detected=1
+else
+    dead_controller_detected=0
+fi
+check "health reports the unavailable controller" "$dead_controller_detected"
 echo
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 bold "───────────────────────────────────────"
 if [ "$FAIL" -eq 0 ]; then
     green "All $PASS checks passed."
+    exit 0
 else
     red "$FAIL of $((PASS+FAIL)) checks failed:"
     for n in "${FAILED_NAMES[@]}"; do red "  - $n"; done
+    exit 1
 fi
-exit $([ "$FAIL" -eq 0 ] && echo 0 || echo 1)

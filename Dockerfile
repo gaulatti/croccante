@@ -7,6 +7,7 @@ RUN apk add --no-cache \
         nginx \
         nginx-mod-rtmp \
         ffmpeg \
+        python3 \
         ca-certificates \
     && update-ca-certificates \
     && mkdir -p /var/log/nginx /run/nginx
@@ -18,11 +19,13 @@ COPY make-filler.sh    /usr/local/bin/make-filler.sh
 COPY relay-start.sh    /usr/local/bin/relay-start.sh
 COPY relay-stop.sh     /usr/local/bin/relay-stop.sh
 COPY healthcheck.sh    /usr/local/bin/healthcheck.sh
+COPY control-server.py /usr/local/bin/control-server.py
 COPY entrypoint.sh     /entrypoint.sh
 
-RUN chmod +x /entrypoint.sh /usr/local/bin/relay-*.sh /usr/local/bin/make-filler.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /entrypoint.sh /usr/local/bin/relay-*.sh /usr/local/bin/make-filler.sh /usr/local/bin/healthcheck.sh /usr/local/bin/control-server.py
 
 EXPOSE 1935
+EXPOSE 8081
 
 # Checks relay supervisor liveness, not just the listener. See healthcheck.sh.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
