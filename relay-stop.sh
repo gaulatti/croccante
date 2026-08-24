@@ -10,6 +10,7 @@ LOG_TAG=relay-stop
 LOG_TO_HOOK_FILE=1
 
 log "publisher disconnected: stream='${1:-}'"
+metric_inc "hooks/publisher-disconnect.total"
 
 # Clearing the marker is the whole job. Each destination supervisor watches it
 # and tears down its own ffmpeg within about a second. Doing it here would not

@@ -1,5 +1,8 @@
 FROM alpine:3.21
 
+ARG BUILD_VERSION=development
+ENV CROCCANTE_BUILD_VERSION=$BUILD_VERSION
+
 # ca-certificates is what makes ffmpeg's native rtmps:// usable — it replaces
 # the stunnel sidecar this image used to carry for Facebook. See
 # docs/architecture.md for the evidence behind that removal.
@@ -20,6 +23,7 @@ COPY relay-start.sh    /usr/local/bin/relay-start.sh
 COPY relay-stop.sh     /usr/local/bin/relay-stop.sh
 COPY healthcheck.sh    /usr/local/bin/healthcheck.sh
 COPY control-server.py /usr/local/bin/control-server.py
+COPY relay_metrics.py  /usr/local/bin/relay_metrics.py
 COPY entrypoint.sh     /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh /usr/local/bin/relay-*.sh /usr/local/bin/make-filler.sh /usr/local/bin/healthcheck.sh /usr/local/bin/control-server.py

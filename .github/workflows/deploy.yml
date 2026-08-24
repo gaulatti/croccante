@@ -58,6 +58,8 @@ jobs:
             ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha
           cache-to:   type=gha,mode=max
+          build-args: |
+            BUILD_VERSION=${{ github.sha }}
 
   # ── 3. Deploy to server via SSH ────────────────────────────────────────────
   deploy:

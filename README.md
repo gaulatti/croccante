@@ -45,6 +45,12 @@ implies Stop.
 The machine contract and example requests are documented in
 [docs/operations.md](docs/operations.md#lifecycle-control-api).
 
+The same private listener exposes authenticated Prometheus metrics at
+`GET /metrics`. It reports container process, publisher, relay, retry,
+backoff, filler, and control-request behavior using bounded labels only. The
+endpoint never emits program names, destination URLs, stream keys, or
+credentials. See [docs/operations.md](docs/operations.md#prometheus-metrics).
+
 RTMPS is handled natively by ffmpeg — there is no stunnel sidecar. See
 [docs/architecture.md](docs/architecture.md) for why.
 
@@ -79,7 +85,7 @@ docker run --rm -p 1935:1935 --env-file .env \
 ```
 
 Brings up local RTMP and RTMPS sinks, runs the relay against them, and asserts
-on actual relayed bytes plus authenticated lifecycle behavior. Needs Docker.
+on actual relayed bytes plus authenticated lifecycle and metrics behavior. Needs Docker.
 Touches no real platform account and no real stream key. Also runs in CI on
 every push.
 
@@ -96,6 +102,7 @@ croccante/
 ├── relay-lib.sh         # Shared helpers (masking, atomic writes, pid checks)
 ├── healthcheck.sh       # Relay-aware container healthcheck
 ├── control-server.py    # Authenticated, program-scoped Start/Stop/state API
+├── relay_metrics.py     # Bounded Prometheus collector for private scraping
 ├── .env.example         # Destination template — copy to .env, never commit
 ├── docs/                # Architecture and operations (destined for the wiki)
 ├── test/smoke.sh        # End-to-end harness against local sinks

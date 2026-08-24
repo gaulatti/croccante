@@ -25,6 +25,7 @@ PUBLISHER_SEEN_FILE="$HOOK_DIR/publisher.seen"
 
 # Generated once by make-filler.sh before any supervisor starts.
 FILLER_FILE="$STATE_DIR/filler.flv"
+METRICS_DIR="$STATE_DIR/metrics"
 
 # Redact the key-bearing tail of a destination URL before it reaches a log.
 # rtmp://a.rtmp.youtube.com/live2/abcd-efgh-ijkl  ->  rtmp://a.rtmp.youtube.com/live2/***
@@ -54,6 +55,18 @@ atomic_write() {
     _dest="$1"
     _val="$2"
     printf '%s\n' "$_val" > "$_dest.tmp" && mv -f "$_dest.tmp" "$_dest"
+}
+
+# Increment a non-negative integer metric file. Each destination supervisor
+# owns its own files, and the single nginx publisher owns the hook files, so no
+# cross-process lock is needed.
+metric_inc() {
+    _metric_file="$METRICS_DIR/$1"
+    _metric_value=$(cat "$_metric_file" 2>/dev/null || echo 0)
+    case "$_metric_value" in
+        ''|*[!0-9]*) _metric_value=0 ;;
+    esac
+    atomic_write "$_metric_file" "$((_metric_value + 1))"
 }
 
 session_started() {

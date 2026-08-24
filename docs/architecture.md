@@ -170,6 +170,29 @@ supervisor, and per-destination mode/health state, but never destination URLs,
 stream keys, or credentials. Croccante authenticates only Alana machine calls;
 operator identity and Pompeii authorization remain upstream concerns.
 
+## Private metrics boundary
+
+The control process also serves `GET /metrics` on the same internal port 8081
+and requires the same mounted bearer token. This deliberately introduces no
+second listener, published port, or credential. The central Prometheus runtime
+must join the private `broadcast-control` network and mount the matching token;
+the endpoint must not be exposed through the edge proxy.
+
+The collector reads runtime state rather than destination configuration. It
+exports container PID 1 CPU, resident memory, and file descriptors; build
+identity; requested session and publisher lifecycle; aggregate destination
+counts; relay attempts, outcomes, retries and backoff; filler activation; and
+control-request counts and duration. Supervisor and nginx hook processes write
+only numeric counter files under `/run/croccante/metrics`.
+
+Metric labels are a closed set. Destination slots 1 through 20 are identified
+only by number, and any larger configured set is aggregated as `overflow`.
+States, results, routes, methods, publisher events, service, and build version
+are likewise bounded. Program IDs, publisher stream names, destination names,
+URLs, stream keys, credentials, and error contents are never labels or sample
+values. This keeps series cardinality predictable and the scrape safe to use
+for fleet alerting.
+
 ### Measured behaviour
 
 Filler is a separate ffmpeg invocation from the live relay, so each transition
