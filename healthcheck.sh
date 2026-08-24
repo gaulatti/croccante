@@ -29,6 +29,10 @@ case "$REQUESTED_STATE" in
     started|stopped) ;;
     *) echo "invalid requested session state"; exit 1 ;;
 esac
+if [ "$REQUESTED_STATE" = "started" ] && ! active_filler_file >/dev/null; then
+    echo "active session has no valid prepared filler"
+    exit 1
+fi
 
 # nginx is the authority on whether a stream is actually arriving. If it sees a
 # publisher and we do not, the exec_publish hook is broken — a failure mode that

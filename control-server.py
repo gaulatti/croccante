@@ -8,11 +8,14 @@ import hmac
 import json
 import os
 import time
+import threading
 import uuid
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
+
+from filler_store import FillerStore, PreparationError, canonical_json
 
 
 STATE_DIR = Path(os.environ.get("STATE_DIR", "/run/croccante"))
@@ -23,6 +26,11 @@ TOKEN_FILE = Path(os.environ.get("CONTROL_TOKEN_FILE", "/run/secrets/croccante-c
 CONTROL_BIND = os.environ.get("CONTROL_BIND", "0.0.0.0")
 CONTROL_PORT = int(os.environ.get("CONTROL_PORT", "8081"))
 PROGRAM_PATH = f"/v1/programs/{quote(PROGRAM_ID, safe='')}/session"
+FILLER_PATH = f"/v1/programs/{quote(PROGRAM_ID, safe='')}/fillers/"
+FILLER_STORE = FillerStore(Path(os.environ.get("FILLER_STORE_DIR", "/var/lib/croccante/fillers")), PROGRAM_ID)
+METRICS = {"success": 0, "failure": 0, "conflict": 0}
+COMMAND_LOCK = threading.RLock()
+PREPARATION_LOCK = threading.Lock()
 
 
 def now() -> str:
@@ -111,6 +119,7 @@ def current_state() -> dict[str, object]:
         mode = "waiting-for-publisher"
         actual = "started"
 
+    active_filler = read_text(CONTROL_DIR / "active-filler.version")
     return {
         "programId": PROGRAM_ID,
         "requestedState": requested,
@@ -122,7 +131,20 @@ def current_state() -> dict[str, object]:
         "mode": mode,
         "destinations": destinations,
         "lastCommand": load_last_command(),
+        "filler": FILLER_STORE.public_state(active_filler) if active_filler else None,
+        "lastPreparation": load_json(CONTROL_DIR / "last-preparation.json"),
     }
+
+
+def load_json(path: Path) -> dict[str, object] | None:
+    raw = read_text(path)
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else None
+    except json.JSONDecodeError:
+        return None
 
 
 def command_record_path(key: str) -> Path:
@@ -136,10 +158,14 @@ def record_command(key: str, record: dict[str, object]) -> None:
     atomic_write(CONTROL_DIR / "last.sequence", str(record["sequence"]))
 
 
-def apply_command(action: str, key: str, sequence: int) -> tuple[int, dict[str, object]]:
+def apply_command(action: str, key: str, sequence: int, filler_version: str | None) -> tuple[int, dict[str, object]]:
     prior_path = command_record_path(key)
     if prior_path.exists():
         prior = json.loads(read_text(prior_path))
+        if prior.get("action") != action or prior.get("fillerVersion") != filler_version:
+            state = current_state()
+            state["error"] = "idempotency key was reused for another command"
+            return 409, state
         state = current_state()
         state["commandResult"] = {**prior, "duplicate": True}
         return 200, state
@@ -153,7 +179,19 @@ def apply_command(action: str, key: str, sequence: int) -> tuple[int, dict[str, 
 
     current = requested_state()
     if action == "start":
+        try:
+            prepared = bool(filler_version and FILLER_STORE.manifest(filler_version))
+        except PreparationError:
+            prepared = False
+        if not prepared:
+            state = current_state()
+            state["error"] = "requested filler version is not prepared"
+            return 409, state
         if current == "started":
+            if read_text(CONTROL_DIR / "active-filler.version") != filler_version:
+                state = current_state()
+                state["error"] = "active session is bound to another filler version"
+                return 409, state
             result = "already-started"
         else:
             session_id = str(uuid.uuid4())
@@ -163,6 +201,7 @@ def apply_command(action: str, key: str, sequence: int) -> tuple[int, dict[str, 
             (HOOK_DIR / "publisher.seen").unlink(missing_ok=True)
             if (HOOK_DIR / "publisher").exists():
                 atomic_write(HOOK_DIR / "publisher.seen", now())
+            atomic_write(CONTROL_DIR / "active-filler.version", filler_version)
             atomic_write(CONTROL_DIR / "requested.state", "started")
             result = "started"
     else:
@@ -171,6 +210,7 @@ def apply_command(action: str, key: str, sequence: int) -> tuple[int, dict[str, 
         else:
             atomic_write(CONTROL_DIR / "requested.state", "stopped")
             (HOOK_DIR / "publisher.seen").unlink(missing_ok=True)
+            (CONTROL_DIR / "active-filler.version").unlink(missing_ok=True)
             atomic_write(CONTROL_DIR / "stopped.at", now())
             result = "stopped"
 
@@ -180,6 +220,7 @@ def apply_command(action: str, key: str, sequence: int) -> tuple[int, dict[str, 
         "action": action,
         "result": result,
         "acceptedAt": now(),
+        "fillerVersion": filler_version if action == "start" else None,
     }
     record_command(key, record)
 
@@ -236,12 +277,101 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self) -> None:  # noqa: N802
+        if urlsplit(self.path).path == "/metrics":
+            if not self.authenticated():
+                self.send_json(401, {"error": "unauthorized"})
+                return
+            self.send_metrics()
+            return
         if not self.authorize_and_scope():
             return
-        if urlsplit(self.path).path != PROGRAM_PATH:
+        path = urlsplit(self.path).path
+        if path.startswith(FILLER_PATH):
+            version = unquote(path[len(FILLER_PATH):])
+            try:
+                state = FILLER_STORE.public_state(version)
+            except PreparationError:
+                self.send_json(404, {"error": "not found"})
+                return
+            self.send_json(200 if state["ready"] else 404, state)
+            return
+        if path != PROGRAM_PATH:
             self.send_json(404, {"error": "not found"})
             return
         self.send_json(200, current_state())
+
+    def send_metrics(self) -> None:
+        prepared = sum(
+            1 for child in FILLER_STORE.program_root.iterdir()
+            if child.is_dir() and not child.name.startswith(".") and FILLER_STORE.manifest(child.name)
+        )
+        active = 1 if read_text(CONTROL_DIR / "active-filler.version") else 0
+        lines = [
+            "# HELP croccante_filler_preparation_total Filler preparation outcomes.",
+            "# TYPE croccante_filler_preparation_total counter",
+        ]
+        for outcome in ("success", "failure", "conflict"):
+            lines.append(f'croccante_filler_preparation_total{{outcome="{outcome}"}} {METRICS[outcome]}')
+        lines += [
+            "# HELP croccante_filler_prepared_versions Prepared version inventory.",
+            "# TYPE croccante_filler_prepared_versions gauge",
+            f"croccante_filler_prepared_versions {prepared}",
+            "# HELP croccante_filler_active_version Whether a session has a bound filler.",
+            "# TYPE croccante_filler_active_version gauge",
+            f"croccante_filler_active_version {active}",
+        ]
+        body = ("\n".join(lines) + "\n").encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_PUT(self) -> None:  # noqa: N802
+        if not self.authorize_and_scope():
+            return
+        path = urlsplit(self.path).path
+        if not path.startswith(FILLER_PATH):
+            self.send_json(404, {"error": "not found"})
+            return
+        version = unquote(path[len(FILLER_PATH):])
+        if not version or "/" in version:
+            self.send_json(404, {"error": "not found"})
+            return
+        key = self.headers.get("Idempotency-Key", "").strip()
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if not key or len(key) > 200 or length < 2 or length > 65536:
+            self.send_json(400, {"error": "bounded body and Idempotency-Key are required"})
+            return
+        try:
+            request = json.loads(self.rfile.read(length))
+            if not isinstance(request, dict) or request.get("commandId") != key:
+                raise ValueError
+        except (json.JSONDecodeError, ValueError):
+            self.send_json(400, {"error": "invalid preparation request"})
+            return
+        atomic_write(CONTROL_DIR / "last-preparation.json", canonical_json({
+            "version": version, "status": "preparing", "ready": False,
+            "acceptedAt": now(),
+        }))
+        try:
+            with PREPARATION_LOCK:
+                result = FILLER_STORE.prepare(version, request, now())
+                FILLER_STORE.cleanup(read_text(CONTROL_DIR / "active-filler.version") or None)
+        except PreparationError as exc:
+            outcome = "conflict" if exc.reason == "version-conflict" else "failure"
+            METRICS[outcome] += 1
+            failure = {"version": version, "status": "failed", "ready": False, "reason": exc.reason, "failedAt": now()}
+            atomic_write(CONTROL_DIR / "last-preparation.json", canonical_json(failure))
+            self.send_json(409 if outcome == "conflict" else 422, failure)
+            return
+        METRICS["success"] += 1
+        atomic_write(CONTROL_DIR / "last-preparation.json", canonical_json(result))
+        self.send_json(200, result)
 
     def do_POST(self) -> None:  # noqa: N802
         if not self.authorize_and_scope():
@@ -263,7 +393,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": "X-Command-Sequence must be a positive integer"})
             return
         action = path.rsplit("/", 1)[1]
-        status, payload = apply_command(action, key, sequence)
+        filler_version = self.headers.get("X-Filler-Version", "").strip() or None
+        with COMMAND_LOCK:
+            status, payload = apply_command(action, key, sequence, filler_version)
         self.send_json(status, payload)
 
 
@@ -272,7 +404,7 @@ def main() -> None:
     (CONTROL_DIR / "commands").mkdir(exist_ok=True)
     if not (CONTROL_DIR / "requested.state").exists():
         atomic_write(CONTROL_DIR / "requested.state", "stopped")
-    server = HTTPServer((CONTROL_BIND, CONTROL_PORT), Handler)
+    server = ThreadingHTTPServer((CONTROL_BIND, CONTROL_PORT), Handler)
     print(f"[control] listening on {CONTROL_BIND}:{CONTROL_PORT} for program={PROGRAM_ID}", flush=True)
     server.serve_forever()
 

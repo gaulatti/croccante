@@ -42,6 +42,13 @@ Start and Stop require both an `Idempotency-Key` and a monotonically increasing
 container. Publisher loss during a started session invokes filler and never
 implies Stop.
 
+Before Start, Alana prepares an immutable program-scoped filler version through
+the same authenticated private API. Croccante downloads the signed source,
+verifies its checksum, transcodes it once to the supplied H.264/AAC live profile,
+and stores it on the durable filler volume. Start names the prepared version with
+`X-Filler-Version`; unprepared or mismatched versions are refused, and an active
+session never switches versions.
+
 The machine contract and example requests are documented in
 [docs/operations.md](docs/operations.md#lifecycle-control-api).
 
@@ -75,10 +82,13 @@ docker run --rm -p 1935:1935 --env-file .env \
 ## Tests
 
 ```bash
+python3 test/test_filler_store.py -v
 ./test/smoke.sh
 ```
 
-Brings up local RTMP and RTMPS sinks, runs the relay against them, and asserts
+The first command performs real local ffmpeg/ffprobe preparation for image,
+silent video, and WebM-with-audio sources plus API/state recovery tests. The
+smoke harness brings up local RTMP and RTMPS sinks, runs the relay, and asserts
 on actual relayed bytes plus authenticated lifecycle behavior. Needs Docker.
 Touches no real platform account and no real stream key. Also runs in CI on
 every push.
@@ -96,6 +106,7 @@ croccante/
 ├── relay-lib.sh         # Shared helpers (masking, atomic writes, pid checks)
 ├── healthcheck.sh       # Relay-aware container healthcheck
 ├── control-server.py    # Authenticated, program-scoped Start/Stop/state API
+├── filler_store.py      # Durable immutable source preparation and validation
 ├── .env.example         # Destination template — copy to .env, never commit
 ├── docs/                # Architecture and operations (destined for the wiki)
 ├── test/smoke.sh        # End-to-end harness against local sinks

@@ -64,8 +64,7 @@ fi
 atomic_write "$STATE_DIR/dest.count" "$DEST_COUNT"
 log "$DEST_COUNT destination(s) configured"
 
-# ── Build the filler asset once, before any supervisor can need it ──────────
-/usr/local/bin/make-filler.sh
+mkdir -p "${FILLER_STORE_DIR:-/var/lib/croccante/fillers}"
 
 # ── Start one supervisor per destination ─────────────────────────────────────
 i=1

@@ -34,7 +34,7 @@ check() { # name, condition-result, detail
 }
 
 cleanup() {
-    docker rm -f croccante-under-test publisher sink-a sink-b sink-tls >/dev/null 2>&1
+    docker rm -f croccante-under-test publisher sink-a sink-b sink-tls filler-source >/dev/null 2>&1
     docker network rm "$NET" >/dev/null 2>&1
 }
 finish() {
@@ -46,16 +46,25 @@ trap finish EXIT
 # ── Setup ────────────────────────────────────────────────────────────────────
 bold "Building images"
 docker build -q -t "$IMAGE" "$ROOT" >/dev/null || { red "croccante build failed"; exit 1; }
+docker run --rm --entrypoint python3 -v "$ROOT:/workspace:ro" -w /workspace "$IMAGE" \
+    test/test_filler_store.py -v || { red "filler preparation runtime tests failed"; exit 1; }
 docker build -q -t "$SINK_IMAGE" "$HERE/sink" >/dev/null || { red "sink build failed"; exit 1; }
 
 cleanup
 docker network create "$NET" >/dev/null
 
 start_sinks() {
+    docker rm -f filler-source >/dev/null 2>&1
     docker run -d --name sink-a --network "$NET" "$SINK_IMAGE" >/dev/null
     docker run -d --name sink-b --network "$NET" "$SINK_IMAGE" >/dev/null
     docker run -d --name sink-tls --network "$NET" -e TLS=1 "$SINK_IMAGE" >/dev/null
+    docker run -d --name filler-source --network "$NET" --entrypoint sh "$IMAGE" -c '
+        mkdir -p /source
+        ffmpeg -hide_banner -loglevel error -y -f lavfi -i color=c=blue:s=320x240 -frames:v 1 /source/filler.bmp
+        cd /source && exec python3 -m http.server 8090
+    ' >/dev/null
     sleep 3
+    SOURCE_SHA=$(docker exec filler-source sha256sum /source/filler.bmp | cut -d ' ' -f1)
 }
 
 # A stream key shaped like a real one, so we can assert it never reaches a log.
@@ -73,6 +82,7 @@ start_croccante() {
         -e RELAY_BACKOFF_MAX=4 \
         "$@" "$IMAGE" >/dev/null
     sleep 2
+    prepare_filler test-default test-prepare >/dev/null
 }
 
 control_request() { # method, action-or-state, token, key, sequence, program
@@ -97,7 +107,31 @@ else:
 }
 
 control_command() { # start|stop, sequence, idempotency key
-    control_request POST "$1" "$TEST_CONTROL_TOKEN" "$3" "$2"
+    if [ "$1" = start ]; then
+        docker exec croccante-under-test python3 -c '
+import sys, urllib.error, urllib.request
+action, token, key, sequence, program = sys.argv[1:]
+request = urllib.request.Request(f"http://127.0.0.1:8081/v1/programs/{program}/session/{action}", data=b"", headers={"Authorization": f"Bearer {token}", "Idempotency-Key": key, "X-Command-Sequence": sequence, "X-Filler-Version": "test-default"}, method="POST")
+try: response = urllib.request.urlopen(request)
+except urllib.error.HTTPError as error: print(error.code); print(error.read().decode())
+else: print(response.status); print(response.read().decode())
+' "$1" "$TEST_CONTROL_TOKEN" "$3" "$2" "$PROGRAM_ID" 2>/dev/null
+    else
+        control_request POST "$1" "$TEST_CONTROL_TOKEN" "$3" "$2"
+    fi
+}
+
+prepare_filler() { # version, idempotency key
+    docker exec croccante-under-test python3 -c '
+import json, sys, urllib.error, urllib.request
+version, key, token, program, checksum = sys.argv[1:]
+payload = {"commandId": key, "source": {"id": "smoke-image", "sha256": checksum, "downloadUrl": "http://filler-source:8090/filler.bmp?signature=redacted-test"}, "profile": {"width": 320, "height": 240, "fps": 15, "videoBitrate": "400k", "audioRate": 44100, "audioChannels": 2, "audioBitrate": "64k", "gop": 30, "loopSeconds": 6}}
+body = json.dumps(payload).encode()
+request = urllib.request.Request(f"http://127.0.0.1:8081/v1/programs/{program}/fillers/{version}", data=body, headers={"Authorization": f"Bearer {token}", "Idempotency-Key": key, "Content-Type": "application/json"}, method="PUT")
+try: response = urllib.request.urlopen(request)
+except urllib.error.HTTPError as error: print(error.code); print(error.read().decode())
+else: print(response.status); print(response.read().decode())
+' "$1" "$2" "$TEST_CONTROL_TOKEN" "$PROGRAM_ID" "$SOURCE_SHA" 2>/dev/null
 }
 
 control_status() {
@@ -314,7 +348,7 @@ bold "Test 9 — filler covers a publisher gap without starving destinations"
 # Fresh containers so the event log starts clean.
 docker rm -f croccante-under-test publisher sink-a sink-b sink-tls >/dev/null 2>&1
 start_sinks
-start_croccante -e FILLER_LOOP_SECONDS=6
+start_croccante
 
 check "no filler before the first publish (state=$(dest_state 1))" "$([ "$(dest_state 1)" = "idle" ] && echo 0 || echo 1)" "filler must not run before a session opens"
 
@@ -405,7 +439,7 @@ check "Stop followed by Start returns to live" $? "state was $(dest_state 1)"
 state_after_start=$(control_status | tail -n 1)
 session_after_start=$(printf '%s' "$state_after_start" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sessionId"])')
 check "fresh Start creates a new session identifier" "$([ "$session_before_stop" != "$session_after_start" ] && echo 0 || echo 1)"
-duplicate_start=$(control_request POST start "$TEST_CONTROL_TOKEN" fresh-start 3)
+duplicate_start=$(control_command start 3 fresh-start)
 check "duplicate Start returns the recorded idempotent result" \
     "$(printf '%s' "$duplicate_start" | tail -n 1 | grep -q '"duplicate":true' && echo 0 || echo 1)"
 procs=$(ffmpeg_procs)

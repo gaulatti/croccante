@@ -23,8 +23,17 @@ SESSION_FILE="$CONTROL_DIR/session.id"
 # the nginx-writable hook directory alongside the live publisher marker.
 PUBLISHER_SEEN_FILE="$HOOK_DIR/publisher.seen"
 
-# Generated once by make-filler.sh before any supervisor starts.
-FILLER_FILE="$STATE_DIR/filler.flv"
+# Durable immutable versions prepared by the authenticated control service.
+FILLER_STORE_DIR="${FILLER_STORE_DIR:-/var/lib/croccante/fillers}"
+ACTIVE_FILLER_VERSION_FILE="$CONTROL_DIR/active-filler.version"
+
+active_filler_file() {
+    _version=$(cat "$ACTIVE_FILLER_VERSION_FILE" 2>/dev/null) || return 1
+    _program_hash=$(printf '%s' "${PROGRAM_ID:?}" | sha256sum | cut -d ' ' -f1)
+    _file="$FILLER_STORE_DIR/$_program_hash/$_version/filler.flv"
+    [ -s "$_file" ] || return 1
+    printf '%s\n' "$_file"
+}
 
 # Redact the key-bearing tail of a destination URL before it reaches a log.
 # rtmp://a.rtmp.youtube.com/live2/abcd-efgh-ijkl  ->  rtmp://a.rtmp.youtube.com/live2/***
