@@ -134,12 +134,28 @@ leg dies with it and the platform ends the broadcast.
 Filler covers that gap. While a session is open but no publisher is connected,
 every destination is fed a pre-encoded asset instead of the live input.
 
-**The asset is encoded once**, at container start, by `make-filler.sh`, at the
-configured broadcast profile. It is then looped to every destination with
+**Each version is encoded once**, before Start, by `filler_store.py`, at the
+profile supplied by Alana for that program. It is then looped to every destination with
 `-c copy`. No encoder runs per destination, so destination count does not cost
 CPU, and a destination sees identical codec, resolution, framerate and audio
 layout across live → filler → live. A mid-stream parameter change is one of the
 things platforms drop a stream for.
+
+Prepared versions live below `/var/lib/croccante/fillers/<program-hash>/<version>`
+on a durable host-mounted volume. Each directory contains only the H.264/AAC FLV
+and a redacted manifest with source/checksum/profile/artifact facts; signed URLs
+and credentials are never persisted. Still images gain silent audio. Video and
+WebM audio is retained when present; silent video gains silence. A temporary
+directory is checksum-verified, transcoded, probed, and atomically renamed only
+after the complete profile matches, so failure cannot damage a ready version.
+
+Start binds the selected version into immutable session state. Supervisors
+resolve that exact file whenever publisher loss selects filler. New versions may
+be prepared while live, but are eligible only for a later session. Cleanup keeps
+the newest versions and always excludes the active reference. Restart returns
+lifecycle state to stopped and revalidates durable manifests and artifact
+checksums, so a prepared version remains usable without Alana, object storage,
+or network access.
 
 ### The session boundary
 

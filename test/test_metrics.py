@@ -137,6 +137,7 @@ class MetricsTest(unittest.TestCase):
         token_file.write_text("bounded-test-token\n")
         os.environ["STATE_DIR"] = str(self.state_dir)
         os.environ["CONTROL_TOKEN_FILE"] = str(token_file)
+        os.environ["FILLER_STORE_DIR"] = str(self.state_dir / "fillers")
 
         module_path = Path(__file__).parent.parent / "control-server.py"
         spec = importlib.util.spec_from_file_location(
@@ -150,7 +151,9 @@ class MetricsTest(unittest.TestCase):
         control_server.HOOK_DIR = self.state_dir / "hooks"
         control_server.TOKEN_FILE = token_file
 
-        server = control_server.HTTPServer(("127.0.0.1", 0), control_server.Handler)
+        server = control_server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), control_server.Handler
+        )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         url = f"http://127.0.0.1:{server.server_port}/metrics"
