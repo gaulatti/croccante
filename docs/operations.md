@@ -9,6 +9,7 @@ croccante only needs 1935, bound to loopback.
 # 1. Deployment directory
 sudo mkdir -p /opt/croccante
 sudo chown $USER /opt/croccante
+mkdir -p /opt/croccante/fillers
 
 # 2. Destination configuration. This file is the ONLY copy of your stream keys.
 cp .env.example /opt/croccante/.env
@@ -95,12 +96,45 @@ Alana supplies the mounted bearer token and the exact configured program ID.
 | `GET /v1/programs/{programId}/session` | Authoritative requested/actual state, session timestamps, publisher presence, mode, destination health, and last command result. |
 | `POST /v1/programs/{programId}/session/start` | Open or idempotently retain the session. |
 | `POST /v1/programs/{programId}/session/stop` | End all public destination sessions and return to idle. |
+| `PUT /v1/programs/{programId}/fillers/{version}` | Idempotently download, checksum, transcode, validate, and atomically prepare an immutable version. |
+| `GET /v1/programs/{programId}/fillers/{version}` | Revalidate and report one prepared version after restart or retry. |
+| `GET /metrics` | Authenticated private preparation counters and version inventory. |
 
 Both POST routes require `Idempotency-Key` and a positive,
 monotonically increasing `X-Command-Sequence`. Reusing a key returns its stored
 result without applying the command again. A sequence older than or equal to a
 different accepted command returns `409`, so a delayed Start cannot undo a
 newer Stop.
+
+Start additionally requires `X-Filler-Version`; the named version must already
+be ready for this program. Preparation requires an `Idempotency-Key` equal to
+the payload's bounded `commandId`:
+
+```json
+{
+  "commandId": "alana-config-123",
+  "source": {
+    "id": "asset-456",
+    "sha256": "64-lowercase-hex-characters",
+    "downloadUrl": "https://signed-download.example/object"
+  },
+  "profile": {
+    "width": 1920, "height": 1080, "fps": 30,
+    "videoBitrate": "6000k", "audioRate": 48000,
+    "audioChannels": 2, "audioBitrate": "160k",
+    "gop": 60, "loopSeconds": 10
+  }
+}
+```
+
+Responses expose only bounded readiness/failure, source identity/checksum,
+artifact checksum, and profile. They never echo or persist the signed URL.
+Repeating the same version/request is safe; different content for an existing
+version returns `409`. Failed work leaves ready and active versions untouched.
+The authenticated `/metrics` surface uses only the bounded `outcome` label and
+reports preparation counts, ready-version inventory, and whether a session has
+a bound version. Version, program, source, command, URL, and credential values
+never become labels.
 
 Example from an authorized container on the private network (read the token
 into the request without printing it):
@@ -110,6 +144,7 @@ curl --fail-with-body \
   -H "Authorization: Bearer $(< /run/secrets/croccante-control-token)" \
   -H 'Idempotency-Key: alana-command-123' \
   -H 'X-Command-Sequence: 123' \
+  -H 'X-Filler-Version: filler-v7' \
   -X POST \
   http://croccante:8081/v1/programs/example-program/session/start
 ```
@@ -158,6 +193,7 @@ to paste.
 ## Verification before shipping a change
 
 ```bash
+python3 test/test_filler_store.py -v
 ./test/smoke.sh
 ```
 

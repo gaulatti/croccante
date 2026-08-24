@@ -78,7 +78,12 @@ while true; do
         log "relaying $SRC -> $MASKED"
     else
         MODE=filler
-        SRC="$FILLER_FILE"
+        SRC=$(active_filler_file) || {
+            log "prepared filler unavailable for active session"
+            set_state backoff
+            sleep 1
+            continue
+        }
         log "publisher gone; filling -> $MASKED"
     fi
     set_state "$MODE"
@@ -88,7 +93,7 @@ while true; do
     # -c copy: no transcoding on the fan-out path.
     # -rw_timeout: bounds a stalled socket. (-stimeout is RTSP-only and was
     # removed in ffmpeg 6; using it here made the relay fail to start at all.)
-    # Both modes are -c copy. Filler was encoded once by make-filler.sh at the
+    # Both modes are -c copy. Filler was encoded once by filler_store.py at the
     # configured broadcast profile, so no encoder runs per destination and a
     # destination sees identical parameters across live/filler transitions.
     if [ "$MODE" = filler ]; then
