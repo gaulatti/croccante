@@ -45,6 +45,9 @@ trap finish EXIT
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 bold "Building images"
+PYTHONPATH="$ROOT" python3 -m unittest discover -s "$HERE" -p 'test_*.py' || {
+    red "metrics unit tests failed"; exit 1;
+}
 docker build -q -t "$IMAGE" "$ROOT" >/dev/null || { red "croccante build failed"; exit 1; }
 docker run --rm --entrypoint python3 -v "$ROOT:/workspace:ro" -w /workspace "$IMAGE" \
     test/test_filler_store.py -v || { red "filler preparation runtime tests failed"; exit 1; }
@@ -136,6 +139,23 @@ else: print(response.status); print(response.read().decode())
 
 control_status() {
     control_request GET state "$TEST_CONTROL_TOKEN" "" ""
+}
+
+metrics_request() { # token
+    docker exec croccante-under-test python3 -c '
+import sys, urllib.error, urllib.request
+token = sys.argv[1]
+headers = {"Authorization": f"Bearer {token}"} if token else {}
+request = urllib.request.Request("http://127.0.0.1:8081/metrics", headers=headers)
+try:
+    response = urllib.request.urlopen(request)
+except urllib.error.HTTPError as error:
+    print(error.code)
+    print(error.read().decode())
+else:
+    print(response.status)
+    print(response.read().decode())
+' "${1:-}" 2>/dev/null
 }
 
 # Publishes a synthetic stream into croccante. Runs from the croccante image
@@ -238,6 +258,23 @@ check "rejects an unauthenticated state request" "$(printf '%s\n' "$unauthorized
 wrong_program=$(control_request GET state "$TEST_CONTROL_TOKEN" "" "" wrong-program)
 check "rejects a request scoped to another program" "$(printf '%s\n' "$wrong_program" | head -n 1 | grep -q 404 && echo 0 || echo 1)"
 
+unauthorized_metrics=$(metrics_request wrong-token)
+check "rejects an unauthenticated metrics scrape" "$(printf '%s\n' "$unauthorized_metrics" | head -n 1 | grep -q 401 && echo 0 || echo 1)"
+authorized_metrics=$(metrics_request "$TEST_CONTROL_TOKEN")
+check "serves authenticated Prometheus metrics" "$(printf '%s\n' "$authorized_metrics" | head -n 1 | grep -q 200 && echo 0 || echo 1)"
+printf '%s\n' "$authorized_metrics" | tail -n +2 | PYTHONPATH="$ROOT" python3 -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("metrics_test_parser", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+samples = module.parse_exposition(sys.stdin.read())
+required = {"croccante_build_info", "croccante_relay_slot_state", "croccante_process_resident_memory_bytes"}
+assert required <= {name for name, _, _ in samples}
+' "$HERE/test_metrics.py"
+check "parses real container collector output" $?
+check "metrics omit program, token, stream key, and destination URL" \
+    "$(printf '%s' "$authorized_metrics" | grep -qE "$PROGRAM_ID|$TEST_CONTROL_TOKEN|$FAKE_KEY|rtmps?://" && echo 1 || echo 0)"
+
 start_publisher
 sleep 4
 check "connected publisher remains idle while stopped" "$([ "$(dest_state 1)" = "idle" ] && echo 0 || echo 1)" "state was $(dest_state 1)"
@@ -267,6 +304,18 @@ check "unreachable destination reports failure and retries" $?
 echo "$logs" | grep -qE "retrying in ([0-9]+)s"
 check "retry uses a backoff delay, not a tight loop" $?
 check "healthy destinations kept relaying regardless" "$([ "${a:-0}" -gt 20000 ] && [ "${b:-0}" -gt 20000 ] && echo 0 || echo 1)"
+failure_metrics=$(metrics_request "$TEST_CONTROL_TOKEN")
+printf '%s\n' "$failure_metrics" | tail -n +2 | PYTHONPATH="$ROOT" python3 -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("metrics_test_parser", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+samples = module.parse_exposition(sys.stdin.read())
+values = {(name, tuple(sorted(labels.items()))): value for name, labels, value in samples}
+assert values[("croccante_relay_retries_total", (("slot", "4"),))] >= 1
+assert values[("croccante_relay_results_total", (("result", "failure"), ("slot", "4")))] >= 1
+' "$HERE/test_metrics.py"
+check "collector reports the isolated failure and retry" $?
 echo
 
 # ── Test 5: no key material in logs ──────────────────────────────────────────
@@ -302,6 +351,20 @@ wait_for_state filler 40
 transitioned=$?
 state_now=$(dest_state 1)
 check "supervisors switch to filler after disconnect (state=${state_now})" "$transitioned" "still ${state_now} after 40s"
+
+filler_metrics=$(metrics_request "$TEST_CONTROL_TOKEN")
+printf '%s\n' "$filler_metrics" | tail -n +2 | PYTHONPATH="$ROOT" python3 -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("metrics_test_parser", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+samples = module.parse_exposition(sys.stdin.read())
+values = {(name, tuple(sorted(labels.items()))): value for name, labels, value in samples}
+assert values[("croccante_filler_activations_total", (("slot", "1"),))] >= 1
+assert values[("croccante_ingest_publisher_events_total", (("event", "connect"),))] >= 1
+assert values[("croccante_ingest_publisher_events_total", (("event", "disconnect"),))] >= 1
+' "$HERE/test_metrics.py"
+check "collector reports publisher lifecycle and filler activation" $?
 
 # Three destinations are reachable; the fourth points at TEST-NET-1 on purpose
 # and sits in backoff with no process, so the healthy range is 3..4 depending on

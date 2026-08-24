@@ -154,6 +154,43 @@ control route becomes unavailable, Croccante keeps the last accepted state.
 Manual recovery uses the same API with a new idempotency key and sequence; a
 container restart is an emergency reset that returns the runtime to stopped.
 
+## Prometheus metrics
+
+`GET /metrics` is served by the existing private listener on port 8081 and uses
+the same bearer token as the lifecycle API. There is no additional Croccante
+secret or public port. The central `gaulatti/prometheus` deployment is the only
+downstream dependency: it must share the private `broadcast-control` network,
+mount the matching token, and scrape `http://croccante:8081/metrics`.
+
+An authenticated diagnostic scrape from a container on that network is:
+
+```bash
+curl --fail-with-body \
+  -H "Authorization: Bearer $(< /run/secrets/croccante-control-token)" \
+  http://croccante:8081/metrics
+```
+
+Do not publish port 8081 or put the token in a Prometheus label or URL. The
+collector omits program IDs, destination URLs, stream keys, credentials,
+publisher stream names, and error contents.
+
+| Metric family | Operational use |
+|---------------|-----------------|
+| `croccante_build_info` | Service and bounded image build identity. |
+| `croccante_process_*` | PID 1 CPU, resident memory, and open descriptors. |
+| `croccante_session_requested_state` | Explicit started/stopped lifecycle request. |
+| `croccante_ingest_publisher_*` | Current publisher presence and connect/disconnect totals. |
+| `croccante_relay_destinations_*` | Configured, active, stalled, and filler destination totals. |
+| `croccante_relay_slot_state` | Bounded per-slot current state; slots above 20 aggregate to `overflow`. |
+| `croccante_relay_attempts_total`, `croccante_relay_results_total` | Relay process attempts and bounded transition/failure/interruption results. |
+| `croccante_relay_retries_total`, `croccante_relay_backoff_seconds` | Retry pressure and current delay. |
+| `croccante_filler_activations_total` | Publisher-gap coverage activations. |
+| `croccante_control_request*` | Private lifecycle and scrape request count/result/duration. |
+
+The image build injects the Git commit SHA as the build version. Local images
+default to `development`. Runtime counters reset with the container, as normal
+Prometheus counters do after process restarts.
+
 ## Diagnosing
 
 ```bash
@@ -183,10 +220,12 @@ to paste.
 | Filler never engages | No publish has happened since the current explicit Start. Filler only covers gaps after live media has appeared in that session. |
 | Publisher connected but destinations remain idle | The session is explicitly stopped. Inspect the lifecycle API and have Alana issue Start. |
 | API returns `401` | Alana's mounted token does not match Croccante's control-token file. Rotate both sides through the approved secret path. |
+| `/metrics` returns `401` | The scraper token is missing or differs from Croccante's control-token file. |
 | API returns `409` | The command sequence is stale or reordered. Read state and retry only the intended newer command with a higher sequence. |
 | One destination in `backoff`, others fine | Bad or revoked key, or that platform is refusing the connection. Check the URL. |
 | All destinations `backoff` | Server lost egress, or the publisher is sending something no destination accepts. |
 | `nginx reports N publisher(s) but no publisher marker` | The `exec_publish` hook cannot write its state directory. Check ownership of `/run/croccante/hooks`. |
+| Relay retry alerts fire | Inspect `croccante_relay_slot_state`, retry/result totals, and current backoff, then verify the corresponding destination configuration locally. Metrics deliberately omit its URL and key. |
 | Relays time out with no data, `nclients` stays 0 | `worker_processes` is not 1. See architecture.md. |
 | Healthcheck fine, no bytes at the platform | Publisher connected but the destination silently drops it — verify the key. |
 
@@ -197,8 +236,8 @@ python3 test/test_filler_store.py -v
 ./test/smoke.sh
 ```
 
-More than 50 checks against local RTMP and RTMPS sinks: private authentication, explicit
-Start/Stop, idempotency and ordering, fan-out, RTMPS, destination isolation,
+More than 50 checks against local RTMP and RTMPS sinks: private authentication,
+Prometheus exposition, explicit Start/Stop, idempotency and ordering, fan-out, RTMPS, destination isolation,
 filler recovery, restart, control-plane loss, key masking, and health failure
 detection. No real platform account is involved.
 

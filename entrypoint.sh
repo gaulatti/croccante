@@ -11,7 +11,7 @@ MAX_SLOTS="${RELAY_MAX_SLOTS:-20}"
 # Fresh state on every start. A previous unclean stop must not leave a stale
 # "publisher is live" marker behind.
 rm -rf "$STATE_DIR"
-mkdir -p "$HOOK_DIR" "$CONTROL_DIR/commands"
+mkdir -p "$HOOK_DIR" "$CONTROL_DIR/commands" "$METRICS_DIR/hooks"
 
 PROGRAM_ID="${PROGRAM_ID:-}"
 CONTROL_TOKEN_FILE="${CONTROL_TOKEN_FILE:-/run/secrets/croccante-control-token}"
@@ -30,6 +30,8 @@ atomic_write "$REQUESTED_STATE_FILE" stopped
 # hooks fail silently, because nginx discards their output.
 chown nginx:nginx "$HOOK_DIR"
 chmod 0775 "$HOOK_DIR"
+chown nginx:nginx "$METRICS_DIR/hooks"
+chmod 0775 "$METRICS_DIR/hooks"
 : > "$HOOK_LOG"
 chown nginx:nginx "$HOOK_LOG"
 

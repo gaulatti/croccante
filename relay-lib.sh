@@ -23,6 +23,7 @@ SESSION_FILE="$CONTROL_DIR/session.id"
 # the nginx-writable hook directory alongside the live publisher marker.
 PUBLISHER_SEEN_FILE="$HOOK_DIR/publisher.seen"
 
+METRICS_DIR="$STATE_DIR/metrics"
 # Durable immutable versions prepared by the authenticated control service.
 FILLER_STORE_DIR="${FILLER_STORE_DIR:-/var/lib/croccante/fillers}"
 ACTIVE_FILLER_VERSION_FILE="$CONTROL_DIR/active-filler.version"
@@ -63,6 +64,18 @@ atomic_write() {
     _dest="$1"
     _val="$2"
     printf '%s\n' "$_val" > "$_dest.tmp" && mv -f "$_dest.tmp" "$_dest"
+}
+
+# Increment a non-negative integer metric file. Each destination supervisor
+# owns its own files, and the single nginx publisher owns the hook files, so no
+# cross-process lock is needed.
+metric_inc() {
+    _metric_file="$METRICS_DIR/$1"
+    _metric_value=$(cat "$_metric_file" 2>/dev/null || echo 0)
+    case "$_metric_value" in
+        ''|*[!0-9]*) _metric_value=0 ;;
+    esac
+    atomic_write "$_metric_file" "$((_metric_value + 1))"
 }
 
 session_started() {

@@ -10,6 +10,7 @@ LOG_TAG=relay-start
 LOG_TO_HOOK_FILE=1
 
 log "publisher connected: stream='${1:-}'"
+metric_inc "hooks/publisher-connect.total"
 
 atomic_write "$PUBLISHER_FILE" "${1:-}"
 

@@ -37,6 +37,9 @@ backoff=1
 
 set_state() {
     atomic_write "$STATE_FILE" "$1"
+    if [ "$1" != "backoff" ]; then
+        atomic_write "$METRICS_DIR/dest-$IDX.backoff.seconds" 0
+    fi
 }
 
 # On container stop, take the child with us rather than orphaning it.
@@ -87,6 +90,10 @@ while true; do
         log "publisher gone; filling -> $MASKED"
     fi
     set_state "$MODE"
+    metric_inc "dest-$IDX.attempt.total"
+    if [ "$MODE" = filler ]; then
+        metric_inc "dest-$IDX.filler-activation.total"
+    fi
 
     started=$(date +%s)
 
@@ -152,6 +159,7 @@ while true; do
 
     if ! session_started; then
         log "session stopped; destination idle"
+        metric_inc "dest-$IDX.result-transition.total"
         set_state idle
         backoff=1
         continue
@@ -160,6 +168,7 @@ while true; do
     if [ "$MODE" = relaying ] && [ ! -f "$PUBLISHER_FILE" ]; then
         # Expected: the publisher dropped. The next iteration picks up filler.
         log "live relay ended after ${elapsed}s; switching to filler"
+        metric_inc "dest-$IDX.result-transition.total"
         backoff=1
         continue
     fi
@@ -167,6 +176,7 @@ while true; do
     if [ "$MODE" = filler ] && [ -f "$PUBLISHER_FILE" ]; then
         # Expected: the publisher returned.
         log "filler ended after ${elapsed}s; switching to live"
+        metric_inc "dest-$IDX.result-transition.total"
         backoff=1
         continue
     fi
@@ -174,10 +184,14 @@ while true; do
     if [ "$elapsed" -ge 30 ]; then
         # It ran for a meaningful stretch, so whatever ended it was transient.
         log "relay ended after ${elapsed}s (rc=$rc); reconnecting"
+        metric_inc "dest-$IDX.result-interrupted.total"
         backoff=1
     else
         log "relay failed after ${elapsed}s (rc=$rc); retrying in ${backoff}s"
+        metric_inc "dest-$IDX.result-failure.total"
+        metric_inc "dest-$IDX.retry.total"
         set_state "backoff"
+        atomic_write "$METRICS_DIR/dest-$IDX.backoff.seconds" "$backoff"
         slept=0
         while [ "$slept" -lt "$backoff" ] && session_started; do
             sleep 1

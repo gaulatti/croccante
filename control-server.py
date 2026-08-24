@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
+import relay_metrics
 from filler_store import FillerStore, PreparationError, canonical_json
 
 
@@ -241,6 +242,30 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "croccante-control"
     sys_version = ""
 
+    def begin_metric(self, route: str) -> None:
+        self._metric_route = route
+        self._metric_started = time.monotonic()
+
+    def record_metric(self, status: int) -> None:
+        if status < 300:
+            result = "success"
+        elif status == 400:
+            result = "invalid"
+        elif status == 401:
+            result = "unauthorized"
+        elif status == 404:
+            result = "not_found"
+        elif status == 409:
+            result = "conflict"
+        else:
+            result = "error"
+        relay_metrics.record_control_request(
+            self.command,
+            getattr(self, "_metric_route", "unknown"),
+            result,
+            time.monotonic() - getattr(self, "_metric_started", time.monotonic()),
+        )
+
     def log_message(self, format_string: str, *args: object) -> None:
         # Do not log request headers or bodies. The entrypoint emits only the
         # bind address, program identifier, actions, and response codes.
@@ -249,8 +274,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_json(self, status: int, payload: dict[str, object]) -> None:
         body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        self.record_metric(status)
         self.send_response(status)
+        if status == 401:
+            self.send_header("WWW-Authenticate", "Bearer")
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_metrics(self) -> None:
+        try:
+            body = (relay_metrics.collect() + self.filler_metrics()).encode("utf-8")
+        except Exception:
+            self.send_json(500, {"error": "metrics unavailable"})
+            return
+        self.record_metric(200)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -277,15 +319,18 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self) -> None:  # noqa: N802
-        if urlsplit(self.path).path == "/metrics":
+        path = urlsplit(self.path).path
+        if path == "/metrics":
+            self.begin_metric("metrics")
             if not self.authenticated():
                 self.send_json(401, {"error": "unauthorized"})
                 return
             self.send_metrics()
             return
+        route = "filler" if path.startswith(FILLER_PATH) else "session" if path == PROGRAM_PATH else "unknown"
+        self.begin_metric(route)
         if not self.authorize_and_scope():
             return
-        path = urlsplit(self.path).path
         if path.startswith(FILLER_PATH):
             version = unquote(path[len(FILLER_PATH):])
             try:
@@ -300,7 +345,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_json(200, current_state())
 
-    def send_metrics(self) -> None:
+    def filler_metrics(self) -> str:
         prepared = sum(
             1 for child in FILLER_STORE.program_root.iterdir()
             if child.is_dir() and not child.name.startswith(".") and FILLER_STORE.manifest(child.name)
@@ -320,15 +365,10 @@ class Handler(BaseHTTPRequestHandler):
             "# TYPE croccante_filler_active_version gauge",
             f"croccante_filler_active_version {active}",
         ]
-        body = ("\n".join(lines) + "\n").encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; version=0.0.4")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        return "\n".join(lines) + "\n"
 
     def do_PUT(self) -> None:  # noqa: N802
+        self.begin_metric("filler")
         if not self.authorize_and_scope():
             return
         path = urlsplit(self.path).path
@@ -374,10 +414,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, result)
 
     def do_POST(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        start_path = f"{PROGRAM_PATH}/start"
+        stop_path = f"{PROGRAM_PATH}/stop"
+        route = "start" if path == start_path else "stop" if path == stop_path else "unknown"
+        self.begin_metric(route)
         if not self.authorize_and_scope():
             return
-        path = urlsplit(self.path).path
-        if path not in (f"{PROGRAM_PATH}/start", f"{PROGRAM_PATH}/stop"):
+        if path not in (start_path, stop_path):
             self.send_json(404, {"error": "not found"})
             return
         key = self.headers.get("Idempotency-Key", "").strip()
