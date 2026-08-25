@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import os
+import signal
 import time
 import threading
 import uuid
@@ -15,6 +16,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
+from destination_runtime import DestinationRuntime
+from destination_store import (
+    DestinationError,
+    DestinationSelection,
+    parse_selection,
+    provider_from_environment,
+    resolve_selection,
+)
 import relay_metrics
 from filler_store import FillerStore, PreparationError, canonical_json
 
@@ -28,10 +37,14 @@ CONTROL_BIND = os.environ.get("CONTROL_BIND", "0.0.0.0")
 CONTROL_PORT = int(os.environ.get("CONTROL_PORT", "8081"))
 PROGRAM_PATH = f"/v1/programs/{quote(PROGRAM_ID, safe='')}/session"
 FILLER_PATH = f"/v1/programs/{quote(PROGRAM_ID, safe='')}/fillers/"
+DESTINATION_PATH = f"/v1/programs/{quote(PROGRAM_ID, safe='')}/destinations/"
 FILLER_STORE = FillerStore(Path(os.environ.get("FILLER_STORE_DIR", "/var/lib/croccante/fillers")), PROGRAM_ID)
 METRICS = {"success": 0, "failure": 0, "conflict": 0}
+DESTINATION_METRICS = {"success": 0, "invalid": 0, "unavailable": 0, "conflict": 0}
 COMMAND_LOCK = threading.RLock()
 PREPARATION_LOCK = threading.Lock()
+DESTINATION_RUNTIME = DestinationRuntime(STATE_DIR, os.environ.get("RELAY_SUPERVISOR", "/usr/local/bin/relay-dest.sh"))
+DESTINATION_PROVIDER = None
 
 
 def now() -> str:
@@ -77,6 +90,7 @@ def destination_state() -> list[dict[str, object]]:
         destinations.append(
             {
                 "index": index,
+                "id": read_text(STATE_DIR / f"dest-{index}.id") or None,
                 "mode": mode,
                 "supervisorHealthy": supervisor_healthy,
                 "publisherProcessHealthy": ffmpeg_healthy,
@@ -121,6 +135,7 @@ def current_state() -> dict[str, object]:
         actual = "started"
 
     active_filler = read_text(CONTROL_DIR / "active-filler.version")
+    active_destinations = DESTINATION_RUNTIME.active
     return {
         "programId": PROGRAM_ID,
         "requestedState": requested,
@@ -131,6 +146,11 @@ def current_state() -> dict[str, object]:
         "publisherConnected": publisher_connected,
         "mode": mode,
         "destinations": destinations,
+        "destinationConfiguration": {
+            "version": active_destinations.selection.version,
+            "selectionHash": active_destinations.selection.selection_hash,
+            "count": len(active_destinations.destinations),
+        } if active_destinations else None,
         "lastCommand": load_last_command(),
         "filler": FILLER_STORE.public_state(active_filler) if active_filler else None,
         "lastPreparation": load_json(CONTROL_DIR / "last-preparation.json"),
@@ -153,17 +173,51 @@ def command_record_path(key: str) -> Path:
     return CONTROL_DIR / "commands" / f"{digest}.json"
 
 
+def destination_record_path(key: str) -> Path:
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return CONTROL_DIR / "destination-commands" / f"{digest}.json"
+
+
 def record_command(key: str, record: dict[str, object]) -> None:
     atomic_write(command_record_path(key), json.dumps(record, separators=(",", ":"), sort_keys=True))
     atomic_write(CONTROL_DIR / "last-command.json", json.dumps(record, separators=(",", ":"), sort_keys=True))
     atomic_write(CONTROL_DIR / "last.sequence", str(record["sequence"]))
 
 
-def apply_command(action: str, key: str, sequence: int, filler_version: str | None) -> tuple[int, dict[str, object]]:
+def destination_provider():
+    global DESTINATION_PROVIDER
+    if DESTINATION_PROVIDER is None:
+        DESTINATION_PROVIDER = provider_from_environment()
+    return DESTINATION_PROVIDER
+
+
+def resolve_destinations(selection: DestinationSelection):
+    try:
+        resolved = resolve_selection(selection, destination_provider())
+    except DestinationError as exc:
+        outcome = "unavailable" if exc.reason in {"secret_unavailable", "provider_unavailable"} else "invalid"
+        DESTINATION_METRICS[outcome] += 1
+        raise
+    DESTINATION_METRICS["success"] += 1
+    return resolved
+
+
+def apply_command(
+    action: str,
+    key: str,
+    sequence: int,
+    filler_version: str | None,
+    destination_selection: DestinationSelection | None,
+) -> tuple[int, dict[str, object]]:
     prior_path = command_record_path(key)
     if prior_path.exists():
         prior = json.loads(read_text(prior_path))
-        if prior.get("action") != action or prior.get("fillerVersion") != filler_version:
+        selection_hash = destination_selection.selection_hash if destination_selection else None
+        if (
+            prior.get("action") != action
+            or prior.get("fillerVersion") != filler_version
+            or prior.get("destinationSelectionHash") != selection_hash
+        ):
             state = current_state()
             state["error"] = "idempotency key was reused for another command"
             return 409, state
@@ -180,6 +234,10 @@ def apply_command(action: str, key: str, sequence: int, filler_version: str | No
 
     current = requested_state()
     if action == "start":
+        if destination_selection is None:
+            state = current_state()
+            state["error"] = "a bounded destination selection is required"
+            return 400, state
         try:
             prepared = bool(filler_version and FILLER_STORE.manifest(filler_version))
         except PreparationError:
@@ -189,30 +247,52 @@ def apply_command(action: str, key: str, sequence: int, filler_version: str | No
             state["error"] = "requested filler version is not prepared"
             return 409, state
         if current == "started":
-            if read_text(CONTROL_DIR / "active-filler.version") != filler_version:
+            active_destinations = DESTINATION_RUNTIME.active
+            if (
+                read_text(CONTROL_DIR / "active-filler.version") != filler_version
+                or active_destinations is None
+                or active_destinations.selection.selection_hash != destination_selection.selection_hash
+            ):
                 state = current_state()
-                state["error"] = "active session is bound to another filler version"
+                state["error"] = "active session is bound to another immutable configuration"
                 return 409, state
             result = "already-started"
         else:
-            session_id = str(uuid.uuid4())
-            atomic_write(CONTROL_DIR / "session.id", session_id)
-            atomic_write(CONTROL_DIR / "started.at", now())
-            (CONTROL_DIR / "stopped.at").unlink(missing_ok=True)
-            (HOOK_DIR / "publisher.seen").unlink(missing_ok=True)
-            if (HOOK_DIR / "publisher").exists():
-                atomic_write(HOOK_DIR / "publisher.seen", now())
-            atomic_write(CONTROL_DIR / "active-filler.version", filler_version)
-            atomic_write(CONTROL_DIR / "requested.state", "started")
+            try:
+                resolved = resolve_destinations(destination_selection)
+                DESTINATION_RUNTIME.activate(resolved)
+            except DestinationError as exc:
+                state = current_state()
+                state["error"] = exc.reason
+                return 503 if exc.reason in {"secret_unavailable", "provider_unavailable"} else 422, state
+            try:
+                session_id = str(uuid.uuid4())
+                atomic_write(CONTROL_DIR / "session.id", session_id)
+                atomic_write(CONTROL_DIR / "started.at", now())
+                (CONTROL_DIR / "stopped.at").unlink(missing_ok=True)
+                (HOOK_DIR / "publisher.seen").unlink(missing_ok=True)
+                if (HOOK_DIR / "publisher").exists():
+                    atomic_write(HOOK_DIR / "publisher.seen", now())
+                atomic_write(CONTROL_DIR / "active-filler.version", filler_version)
+                # Commit the public lifecycle transition last. Supervisors
+                # cannot open destinations while this remains stopped.
+                atomic_write(CONTROL_DIR / "requested.state", "started")
+            except OSError:
+                DESTINATION_RUNTIME.deactivate()
+                state = current_state()
+                state["error"] = "runtime_activation_failed"
+                return 503, state
             result = "started"
     else:
         if current == "stopped":
             result = "already-stopped"
+            DESTINATION_RUNTIME.deactivate()
         else:
             atomic_write(CONTROL_DIR / "requested.state", "stopped")
             (HOOK_DIR / "publisher.seen").unlink(missing_ok=True)
             (CONTROL_DIR / "active-filler.version").unlink(missing_ok=True)
             atomic_write(CONTROL_DIR / "stopped.at", now())
+            DESTINATION_RUNTIME.deactivate()
             result = "stopped"
 
     record = {
@@ -222,6 +302,9 @@ def apply_command(action: str, key: str, sequence: int, filler_version: str | No
         "result": result,
         "acceptedAt": now(),
         "fillerVersion": filler_version if action == "start" else None,
+        "destinationVersion": destination_selection.version if destination_selection else None,
+        "destinationSelectionHash": destination_selection.selection_hash if destination_selection else None,
+        "destinationCount": len(destination_selection.references) if destination_selection else None,
     }
     record_command(key, record)
 
@@ -364,14 +447,75 @@ class Handler(BaseHTTPRequestHandler):
             "# HELP croccante_filler_active_version Whether a session has a bound filler.",
             "# TYPE croccante_filler_active_version gauge",
             f"croccante_filler_active_version {active}",
+            "# HELP croccante_destination_resolution_total Destination configuration resolution outcomes.",
+            "# TYPE croccante_destination_resolution_total counter",
         ]
+        for outcome in ("success", "invalid", "unavailable", "conflict"):
+            lines.append(f'croccante_destination_resolution_total{{outcome="{outcome}"}} {DESTINATION_METRICS[outcome]}')
         return "\n".join(lines) + "\n"
 
     def do_PUT(self) -> None:  # noqa: N802
-        self.begin_metric("filler")
+        path = urlsplit(self.path).path
+        route = "destinations" if path.startswith(DESTINATION_PATH) else "filler"
+        self.begin_metric(route)
         if not self.authorize_and_scope():
             return
-        path = urlsplit(self.path).path
+        if path.startswith(DESTINATION_PATH):
+            version = unquote(path[len(DESTINATION_PATH):])
+            if not version or "/" in version:
+                self.send_json(404, {"error": "not found"})
+                return
+            key = self.headers.get("Idempotency-Key", "").strip()
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            if not key or len(key) > 200 or length < 2 or length > 65536:
+                self.send_json(400, {"error": "bounded body and Idempotency-Key are required"})
+                return
+            try:
+                request = json.loads(self.rfile.read(length))
+                if not isinstance(request, dict) or set(request) != {"commandId", "version", "destinations"} or request.get("commandId") != key:
+                    raise ValueError
+                selection = parse_selection(
+                    {"version": request["version"], "destinations": request["destinations"]},
+                    expected_version=version,
+                )
+            except (json.JSONDecodeError, ValueError, DestinationError) as exc:
+                if isinstance(exc, DestinationError):
+                    DESTINATION_METRICS["invalid"] += 1
+                self.send_json(400, {"error": "invalid destination configuration"})
+                return
+            with COMMAND_LOCK:
+                if requested_state() != "stopped":
+                    DESTINATION_METRICS["conflict"] += 1
+                    self.send_json(409, {"error": "destination reconfiguration requires a stopped session"})
+                    return
+                record_path = destination_record_path(key)
+                if record_path.exists():
+                    prior = load_json(record_path)
+                    if prior is None or prior.get("selectionHash") != selection.selection_hash:
+                        DESTINATION_METRICS["conflict"] += 1
+                        self.send_json(409, {"error": "idempotency key was reused for another configuration"})
+                        return
+                    self.send_json(200, {**prior, "duplicate": True})
+                    return
+                try:
+                    resolved = resolve_destinations(selection)
+                except DestinationError as exc:
+                    self.send_json(503 if exc.reason in {"secret_unavailable", "provider_unavailable"} else 422, {"error": exc.reason})
+                    return
+                record = {
+                    "id": key,
+                    "version": selection.version,
+                    "selectionHash": selection.selection_hash,
+                    "destinationCount": len(resolved.destinations),
+                    "result": "validated",
+                    "acceptedAt": now(),
+                }
+                atomic_write(record_path, canonical_json(record))
+                self.send_json(200, record)
+            return
         if not path.startswith(FILLER_PATH):
             self.send_json(404, {"error": "not found"})
             return
@@ -438,16 +582,37 @@ class Handler(BaseHTTPRequestHandler):
             return
         action = path.rsplit("/", 1)[1]
         filler_version = self.headers.get("X-Filler-Version", "").strip() or None
+        destination_selection = None
+        if action == "start":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            if length < 2 or length > 65536:
+                self.send_json(400, {"error": "a bounded destination selection is required"})
+                return
+            try:
+                destination_selection = parse_selection(json.loads(self.rfile.read(length)))
+            except (json.JSONDecodeError, DestinationError):
+                DESTINATION_METRICS["invalid"] += 1
+                self.send_json(400, {"error": "invalid destination selection"})
+                return
         with COMMAND_LOCK:
-            status, payload = apply_command(action, key, sequence, filler_version)
+            status, payload = apply_command(action, key, sequence, filler_version, destination_selection)
         self.send_json(status, payload)
 
 
 def main() -> None:
     CONTROL_DIR.mkdir(parents=True, exist_ok=True)
     (CONTROL_DIR / "commands").mkdir(exist_ok=True)
+    (CONTROL_DIR / "destination-commands").mkdir(exist_ok=True)
     if not (CONTROL_DIR / "requested.state").exists():
         atomic_write(CONTROL_DIR / "requested.state", "stopped")
+    def stop_runtime(*_args: object) -> None:
+        DESTINATION_RUNTIME.deactivate()
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop_runtime)
+    signal.signal(signal.SIGINT, stop_runtime)
     server = ThreadingHTTPServer((CONTROL_BIND, CONTROL_PORT), Handler)
     print(f"[control] listening on {CONTROL_BIND}:{CONTROL_PORT} for program={PROGRAM_ID}", flush=True)
     server.serve_forever()

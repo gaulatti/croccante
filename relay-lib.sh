@@ -36,12 +36,6 @@ active_filler_file() {
     printf '%s\n' "$_file"
 }
 
-# Redact the key-bearing tail of a destination URL before it reaches a log.
-# rtmp://a.rtmp.youtube.com/live2/abcd-efgh-ijkl  ->  rtmp://a.rtmp.youtube.com/live2/***
-mask_dest() {
-    printf '%s\n' "$1" | sed 's#/[^/]*$#/***#'
-}
-
 log() {
     if [ "${LOG_TO_HOOK_FILE:-0}" = "1" ]; then
         printf '[%s] %s\n' "${LOG_TAG:-croccante}" "$*" >> "$HOOK_LOG" 2>/dev/null
@@ -56,7 +50,10 @@ pid_alive() {
     [ -f "$_pf" ] || return 1
     _p=$(cat "$_pf" 2>/dev/null) || return 1
     [ -n "$_p" ] || return 1
-    kill -0 "$_p" 2>/dev/null
+    kill -0 "$_p" 2>/dev/null || return 1
+    # kill -0 succeeds for an unreaped zombie. A dead supervisor remains a
+    # zombie child of the controller until Stop, so check kernel state too.
+    [ "$(cut -d ' ' -f3 "/proc/$_p/stat" 2>/dev/null)" != "Z" ]
 }
 
 # Write a file atomically so no reader ever sees a half-written value.

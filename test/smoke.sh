@@ -17,6 +17,17 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
 CONTROL_SECRET_FILE=$(mktemp)
 printf '%s\n' "$TEST_CONTROL_TOKEN" > "$CONTROL_SECRET_FILE"
+# A stream key shaped like a real one, so we can assert it never reaches a log.
+FAKE_KEY="abcd-efgh-ijkl-mnop-qrst"
+FAKE_SECRETS_FILE=$(mktemp)
+cat > "$FAKE_SECRETS_FILE" <<EOF
+{
+  "sink-a": {"version-a": {"scheme": "rtmp", "host": "sink-a", "port": 1935, "application": "live", "streamKey": "$FAKE_KEY"}},
+  "sink-b": {"version-b": {"scheme": "rtmp", "host": "sink-b", "port": 1935, "application": "live", "streamKey": "$FAKE_KEY"}},
+  "sink-tls": {"version-tls": {"scheme": "rtmps", "host": "sink-tls", "port": 443, "application": "live", "streamKey": "$FAKE_KEY"}},
+  "sink-down": {"version-down": {"scheme": "rtmp", "host": "192.0.2.1", "port": 1935, "application": "live", "streamKey": "unreachable"}}
+}
+EOF
 
 PASS=0
 FAIL=0
@@ -34,12 +45,12 @@ check() { # name, condition-result, detail
 }
 
 cleanup() {
-    docker rm -f croccante-under-test publisher sink-a sink-b sink-tls filler-source >/dev/null 2>&1
+    docker rm -f croccante-under-test croccante-nodest publisher sink-a sink-b sink-tls filler-source >/dev/null 2>&1
     docker network rm "$NET" >/dev/null 2>&1
 }
 finish() {
     cleanup
-    rm -f "$CONTROL_SECRET_FILE"
+    rm -f "$CONTROL_SECRET_FILE" "$FAKE_SECRETS_FILE"
 }
 trap finish EXIT
 
@@ -70,18 +81,15 @@ start_sinks() {
     SOURCE_SHA=$(docker exec filler-source sha256sum /source/filler.bmp | cut -d ' ' -f1)
 }
 
-# A stream key shaped like a real one, so we can assert it never reaches a log.
-FAKE_KEY="abcd-efgh-ijkl-mnop-qrst"
-
 start_croccante() {
     docker run -d --name croccante-under-test --network "$NET" \
         -e PROGRAM_ID="$PROGRAM_ID" \
         -e CONTROL_TOKEN_FILE=/run/secrets/croccante-control-token \
         -v "$CONTROL_SECRET_FILE:/run/secrets/croccante-control-token:ro" \
-        -e RELAY_DEST_1="rtmp://sink-a:1935/live/$FAKE_KEY" \
-        -e RELAY_DEST_5="rtmp://sink-b:1935/live/$FAKE_KEY" \
-        -e RELAY_DEST_9="rtmps://sink-tls:443/live/$FAKE_KEY" \
-        -e RELAY_DEST_12="rtmp://192.0.2.1:1935/live/unreachable" \
+        -e CROCCANTE_ENVIRONMENT=test \
+        -e DESTINATION_SECRET_PROVIDER=file \
+        -e DESTINATION_FAKE_SECRETS_FILE=/run/secrets/destination-fixtures \
+        -v "$FAKE_SECRETS_FILE:/run/secrets/destination-fixtures:ro" \
         -e RELAY_BACKOFF_MAX=4 \
         "$@" "$IMAGE" >/dev/null
     sleep 2
@@ -112,9 +120,16 @@ else:
 control_command() { # start|stop, sequence, idempotency key
     if [ "$1" = start ]; then
         docker exec croccante-under-test python3 -c '
-import sys, urllib.error, urllib.request
+import json, sys, urllib.error, urllib.request
 action, token, key, sequence, program = sys.argv[1:]
-request = urllib.request.Request(f"http://127.0.0.1:8081/v1/programs/{program}/session/{action}", data=b"", headers={"Authorization": f"Bearer {token}", "Idempotency-Key": key, "X-Command-Sequence": sequence, "X-Filler-Version": "test-default"}, method="POST")
+selection = {"version": "smoke-destinations-v1", "destinations": [
+    {"id": "sink-a", "secretId": "sink-a", "versionId": "version-a"},
+    {"id": "sink-b", "secretId": "sink-b", "versionId": "version-b"},
+    {"id": "sink-tls", "secretId": "sink-tls", "versionId": "version-tls"},
+    {"id": "sink-down", "secretId": "sink-down", "versionId": "version-down"},
+]}
+body = json.dumps(selection).encode()
+request = urllib.request.Request(f"http://127.0.0.1:8081/v1/programs/{program}/session/{action}", data=body, headers={"Authorization": f"Bearer {token}", "Idempotency-Key": key, "X-Command-Sequence": sequence, "X-Filler-Version": "test-default", "Content-Type": "application/json"}, method="POST")
 try: response = urllib.request.urlopen(request)
 except urllib.error.HTTPError as error: print(error.code); print(error.read().decode())
 else: print(response.status); print(response.read().decode())
@@ -122,6 +137,24 @@ else: print(response.status); print(response.read().decode())
     else
         control_request POST "$1" "$TEST_CONTROL_TOKEN" "$3" "$2"
     fi
+}
+
+configure_destinations() {
+    docker exec croccante-under-test python3 -c '
+import json, sys, urllib.error, urllib.request
+token, program = sys.argv[1:]
+payload = {"commandId": "smoke-destinations-prepare", "version": "smoke-destinations-v1", "destinations": [
+    {"id": "sink-a", "secretId": "sink-a", "versionId": "version-a"},
+    {"id": "sink-b", "secretId": "sink-b", "versionId": "version-b"},
+    {"id": "sink-tls", "secretId": "sink-tls", "versionId": "version-tls"},
+    {"id": "sink-down", "secretId": "sink-down", "versionId": "version-down"},
+]}
+body = json.dumps(payload).encode()
+request = urllib.request.Request(f"http://127.0.0.1:8081/v1/programs/{program}/destinations/smoke-destinations-v1", data=body, headers={"Authorization": f"Bearer {token}", "Idempotency-Key": "smoke-destinations-prepare", "Content-Type": "application/json"}, method="PUT")
+try: response = urllib.request.urlopen(request)
+except urllib.error.HTTPError as error: print(error.code); print(error.read().decode())
+else: print(response.status); print(response.read().decode())
+' "$TEST_CONTROL_TOKEN" "$PROGRAM_ID" 2>/dev/null
 }
 
 prepare_filler() { # version, idempotency key
@@ -228,7 +261,7 @@ wait_for_control_mode() { # mode, timeout
 # watchdog poll, so poll rather than guessing a sleep.
 wait_for_idle() {
     for _ in $(seq 1 "${1:-40}"); do
-        [ "$(dest_state 1)" = "idle" ] && return 0
+        [ "$(docker exec croccante-under-test cat /run/croccante/dest.count 2>/dev/null | tr -d ' \n')" = "0" ] && return 0
         sleep 1
     done
     return 1
@@ -236,22 +269,31 @@ wait_for_idle() {
 
 echo
 
-# ── Test 1: refuses to start with no destinations ────────────────────────────
-bold "Test 1 — refuses to start with no destinations configured"
-out=$(docker run --rm --name croccante-nodest \
+# ── Test 1: boots safely without static destinations ─────────────────────────
+bold "Test 1 — boots stopped without static destination configuration"
+docker run -d --name croccante-nodest --network "$NET" \
     -e PROGRAM_ID="$PROGRAM_ID" \
     -e CONTROL_TOKEN_FILE=/run/secrets/croccante-control-token \
     -v "$CONTROL_SECRET_FILE:/run/secrets/croccante-control-token:ro" \
-    "$IMAGE" 2>&1); rc=$?
-check "exits non-zero" "$([ $rc -ne 0 ] && echo 0 || echo 1)" "exit code was $rc"
-echo "$out" | grep -q "no destinations configured"
-check "explains why" $? "output was: $out"
+    -e CROCCANTE_ENVIRONMENT=test \
+    -e DESTINATION_SECRET_PROVIDER=file \
+    -e DESTINATION_FAKE_SECRETS_FILE=/run/secrets/destination-fixtures \
+    -v "$FAKE_SECRETS_FILE:/run/secrets/destination-fixtures:ro" \
+    "$IMAGE" >/dev/null
+sleep 2
+check "container stays healthy while stopped" "$(docker exec croccante-nodest /usr/local/bin/healthcheck.sh >/dev/null 2>&1; echo $?)"
+count=$(docker exec croccante-nodest cat /run/croccante/dest.count | tr -d ' \n')
+check "no destination process exists before Start" "$([ "$count" = 0 ] && echo 0 || echo 1)" "count was $count"
+docker rm -f croccante-nodest >/dev/null
 echo
 
 # ── Test 2: private explicit start ───────────────────────────────────────────
 bold "Test 2 — publisher is withheld until authenticated explicit Start"
 start_sinks
 start_croccante
+configured=$(configure_destinations)
+check "stopped reconfiguration validates every exact secret version" "$(printf '%s\n' "$configured" | head -n 1 | grep -q 200 && echo 0 || echo 1)"
+check "configuration response omits secret references and keys" "$(printf '%s' "$configured" | grep -qE 'sink-a|version-a|abcd-efgh' && echo 1 || echo 0)"
 
 unauthorized=$(control_request GET state wrong-token "" "")
 check "rejects an unauthenticated state request" "$(printf '%s\n' "$unauthorized" | head -n 1 | grep -q 401 && echo 0 || echo 1)"
@@ -268,7 +310,7 @@ spec = importlib.util.spec_from_file_location("metrics_test_parser", sys.argv[1]
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 samples = module.parse_exposition(sys.stdin.read())
-required = {"croccante_build_info", "croccante_relay_slot_state", "croccante_process_resident_memory_bytes"}
+required = {"croccante_build_info", "croccante_process_resident_memory_bytes"}
 assert required <= {name for name, _, _ in samples}
 ' "$HERE/test_metrics.py"
 check "parses real container collector output" $?
@@ -277,7 +319,8 @@ check "metrics omit program, token, stream key, and destination URL" \
 
 start_publisher
 sleep 4
-check "connected publisher remains idle while stopped" "$([ "$(dest_state 1)" = "idle" ] && echo 0 || echo 1)" "state was $(dest_state 1)"
+count=$(docker exec croccante-under-test cat /run/croccante/dest.count | tr -d ' \n')
+check "connected publisher creates no destinations while stopped" "$([ "$count" = 0 ] && echo 0 || echo 1)" "count was $count"
 before_start=$(recorded_bytes sink-a)
 check "no destination bytes before Start (${before_start})" "$([ "${before_start:-0}" -eq 0 ] && echo 0 || echo 1)"
 
@@ -291,9 +334,12 @@ a=$(recorded_bytes sink-a); b=$(recorded_bytes sink-b); t=$(recorded_bytes sink-
 check "sink-a received data (${a} bytes)"   "$([ "${a:-0}" -gt 20000 ] && echo 0 || echo 1)" "only ${a} bytes"
 check "sink-b received data (${b} bytes)"   "$([ "${b:-0}" -gt 20000 ] && echo 0 || echo 1)" "only ${b} bytes"
 
-# ── Test 3: native RTMPS output (the stunnel-removal evidence) ───────────────
-bold "Test 3 — native rtmps:// output works without a stunnel sidecar"
+# ── Test 3: native RTMPS output ──────────────────────────────────────────────
+bold "Test 3 — native rtmps:// output works with secret-free process arguments"
 check "rtmps sink received data (${t} bytes)" "$([ "${t:-0}" -gt 20000 ] && echo 0 || echo 1)" "only ${t} bytes"
+process_args=$(docker exec croccante-under-test ps -o args 2>/dev/null)
+check "process arguments omit complete destinations and stream keys" \
+    "$(printf '%s' "$process_args" | grep -qE "$FAKE_KEY|sink-a:1935|sink-tls:443" && echo 1 || echo 0)"
 echo
 
 # ── Test 4: a failing destination does not disturb the others ────────────────
@@ -326,8 +372,8 @@ else
     key_absent=0
 fi
 check "key absent from container logs" "$key_absent" "the fake key appeared in logs"
-echo "$logs" | grep -q '/\*\*\*'
-check "destinations are logged masked" $?
+check "resolved destination hosts are absent from logs" \
+    "$(printf '%s' "$logs" | grep -qE 'sink-a:1935|sink-b:1935|sink-tls:443|192\.0\.2\.1' && echo 1 || echo 0)"
 echo
 
 # ── Test 6: healthcheck reflects relay state ─────────────────────────────────
@@ -413,7 +459,10 @@ docker rm -f croccante-under-test publisher sink-a sink-b sink-tls >/dev/null 2>
 start_sinks
 start_croccante
 
-check "no filler before the first publish (state=$(dest_state 1))" "$([ "$(dest_state 1)" = "idle" ] && echo 0 || echo 1)" "filler must not run before a session opens"
+count=$(docker exec croccante-under-test cat /run/croccante/dest.count | tr -d ' \n')
+check "no destination workers or filler before Start" \
+    "$([ "$count" = 0 ] && [ -z "$(dest_state 1)" ] && echo 0 || echo 1)" \
+    "workers or filler existed before the session opened"
 
 waiting=$(control_command start 1 filler-start)
 check "Start without a publisher is accepted" "$(printf '%s\n' "$waiting" | head -n 1 | grep -q 200 && echo 0 || echo 1)"
@@ -491,9 +540,10 @@ duplicate=$(control_request POST stop "$TEST_CONTROL_TOKEN" explicit-stop 2)
 check "duplicate Stop returns the recorded idempotent result" \
     "$(printf '%s' "$duplicate" | tail -n 1 | grep -q '"duplicate":true' && echo 0 || echo 1)"
 
-reordered=$(control_request POST start "$TEST_CONTROL_TOKEN" reordered-start 1)
+reordered=$(control_command start 1 reordered-start)
 check "reordered Start is rejected" "$(printf '%s\n' "$reordered" | head -n 1 | grep -q 409 && echo 0 || echo 1)"
-check "reordered command cannot reopen destinations" "$([ "$(dest_state 1)" = "idle" ] && echo 0 || echo 1)"
+count=$(docker exec croccante-under-test cat /run/croccante/dest.count | tr -d ' \n')
+check "reordered command cannot reopen destinations" "$([ "$count" = 0 ] && echo 0 || echo 1)"
 
 started_again=$(control_command start 3 fresh-start)
 check "newer Start is accepted" "$(printf '%s\n' "$started_again" | head -n 1 | grep -q 200 && echo 0 || echo 1)"

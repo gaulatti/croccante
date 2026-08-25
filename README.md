@@ -16,17 +16,24 @@ others, and a network blip resolves itself without restarting anything.
 
 ## Configuring destinations
 
-Destinations are a flat list of **full URLs** — `RELAY_DEST_1` … `RELAY_DEST_20`.
-There is no per-platform configuration: anything ffmpeg can write FLV to works.
+Croccante accepts no destination URLs or stream keys in environment variables.
+At authenticated Start, Alana supplies an exact configuration version plus one
+to twenty opaque IDs and versioned AWS Secrets Manager references:
 
-```bash
-RELAY_DEST_1=rtmp://a.rtmp.youtube.com/live2/<key>
-RELAY_DEST_2=rtmp://10.0.0.5:1935/live/mystream
-RELAY_DEST_3=rtmps://live-api-s.facebook.com:443/rtmp/<key>
+```json
+{
+  "version": "destinations-2026-08-25.1",
+  "destinations": [
+    {"id": "primary", "secretId": "broadcast/example/primary", "versionId": "00000000-0000-0000-0000-000000000000"}
+  ]
+}
 ```
 
-Empty and absent slots are skipped, and slot numbers need not be contiguous.
-The container refuses to start if no destination is configured.
+Each referenced secret is a strict JSON object containing only `scheme`,
+`host`, optional `port`, `application`, and `streamKey`. Croccante resolves
+every exact version before opening any output and binds the resulting selection
+immutably to that session. A secret rotation takes effect only through an
+explicit Stop, validation/reload, and new Start.
 
 ## Explicit broadcast lifecycle
 
@@ -58,10 +65,9 @@ backoff, filler, and control-request behavior using bounded labels only. The
 endpoint never emits program names, destination URLs, stream keys, or
 credentials. See [docs/operations.md](docs/operations.md#prometheus-metrics).
 
-RTMPS is handled natively by ffmpeg — there is no stunnel sidecar. See
-[docs/architecture.md](docs/architecture.md) for why.
-
-See [.env.example](.env.example) for the full set of tuning variables.
+RTMPS is handled natively by ffmpeg. Resolved URLs are injected at its I/O
+boundary from root-only runtime state, so keys never appear in process
+arguments. See [docs/architecture.md](docs/architecture.md).
 
 ## Publisher settings
 
@@ -80,8 +86,12 @@ Locally:
 
 ```bash
 docker build -t croccante:dev .
-docker run --rm -p 1935:1935 --env-file .env \
+docker run --rm -p 1935:1935 \
+  -e PROGRAM_ID=example-program \
+  -e AWS_REGION=us-east-1 \
   --mount type=bind,src="$PWD/control-token",dst=/run/secrets/croccante-control-token,readonly \
+  --mount type=bind,src="$PWD/aws-credentials",dst=/run/secrets/aws-credentials,readonly \
+  -e AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws-credentials \
   croccante:dev
 ```
 
@@ -106,16 +116,18 @@ every push.
 croccante/
 ├── Dockerfile           # Alpine + nginx-mod-rtmp + ffmpeg
 ├── nginx.conf           # RTMP ingest + loopback stat endpoint (static, not templated)
-├── entrypoint.sh        # Resolves destinations, starts supervisors, execs nginx
+├── destination_store.py # Strict selection parsing and exact secret resolution
+├── destination_runtime.py # Atomic supervisor ownership for one session
+├── destination_url_shim.c # Keeps resolved output URLs out of ffmpeg argv
+├── entrypoint.sh        # Initializes stopped state and execs nginx
 ├── relay-dest.sh        # One supervisor per destination: relay, retry, back off
 ├── relay-start.sh       # nginx exec_publish hook   — records the live stream name
 ├── relay-stop.sh        # nginx exec_publish_done   — clears it
-├── relay-lib.sh         # Shared helpers (masking, atomic writes, pid checks)
+├── relay-lib.sh         # Shared helpers (atomic writes, pid checks, counters)
 ├── healthcheck.sh       # Relay-aware container healthcheck
 ├── control-server.py    # Authenticated, program-scoped Start/Stop/state API
 ├── relay_metrics.py     # Bounded Prometheus collector for private scraping
 ├── filler_store.py      # Durable immutable source preparation and validation
-├── .env.example         # Destination template — copy to .env, never commit
 ├── docs/                # Architecture and operations (destined for the wiki)
 ├── test/smoke.sh        # End-to-end harness against local sinks
 └── .github/workflows/deploy.yml

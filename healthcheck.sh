@@ -15,6 +15,7 @@ nc -z 127.0.0.1 1935 || { echo "nginx not accepting on 1935"; exit 1; }
 pid_alive "$STATE_DIR/control.pid" || { echo "lifecycle control server is dead"; exit 1; }
 
 COUNT=$(cat "$STATE_DIR/dest.count" 2>/dev/null) || { echo "no destination count"; exit 1; }
+case "$COUNT" in ''|*[!0-9]*) echo "invalid destination count"; exit 1 ;; esac
 
 PUBLISHER_LIVE=0
 PUBLISHER_AGE=0
@@ -31,6 +32,10 @@ case "$REQUESTED_STATE" in
 esac
 if [ "$REQUESTED_STATE" = "started" ] && ! active_filler_file >/dev/null; then
     echo "active session has no valid prepared filler"
+    exit 1
+fi
+if [ "$REQUESTED_STATE" = "started" ] && [ "$COUNT" -eq 0 ]; then
+    echo "active session has no destination supervisors"
     exit 1
 fi
 
