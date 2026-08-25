@@ -132,6 +132,18 @@ class FillerStoreRuntimeTest(unittest.TestCase):
         state = self.root / "api-state"
         token = self.root / "api-token"
         token.write_text("private-test-token\n")
+        secrets = self.root / "destination-secrets.json"
+        secrets.write_text(json.dumps({
+            "secret-a": {
+                "version-a": {
+                    "scheme": "rtmp", "host": "127.0.0.1", "port": 19350,
+                    "application": "live", "streamKey": "fictional-key",
+                }
+            }
+        }))
+        supervisor = self.root / "supervisor.sh"
+        supervisor.write_text("#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile true; do sleep 1; done\n")
+        supervisor.chmod(0o700)
         with socket.socket() as candidate:
             candidate.bind(("127.0.0.1", 0))
             port = candidate.getsockname()[1]
@@ -143,6 +155,10 @@ class FillerStoreRuntimeTest(unittest.TestCase):
             "CONTROL_TOKEN_FILE": str(token),
             "CONTROL_BIND": "127.0.0.1",
             "CONTROL_PORT": str(port),
+            "CROCCANTE_ENVIRONMENT": "test",
+            "DESTINATION_SECRET_PROVIDER": "file",
+            "DESTINATION_FAKE_SECRETS_FILE": str(secrets),
+            "RELAY_SUPERVISOR": str(supervisor),
         }
         server = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve().parents[1] / "control-server.py")],
@@ -163,6 +179,12 @@ class FillerStoreRuntimeTest(unittest.TestCase):
                     return error.code, error.read().decode()
 
         try:
+            selection = {
+                "version": "destinations-v1",
+                "destinations": [
+                    {"id": "sink-a", "secretId": "secret-a", "versionId": "version-a"}
+                ],
+            }
             for _ in range(50):
                 try:
                     if call("GET", "/v1/programs/program-a/session")[0] == 200:
@@ -171,8 +193,26 @@ class FillerStoreRuntimeTest(unittest.TestCase):
                     time.sleep(0.05)
             else:
                 self.fail("control server did not start")
+            configuration = {
+                "commandId": "destinations-prepare-1",
+                **selection,
+            }
+            configured = call(
+                "PUT", "/v1/programs/program-a/destinations/destinations-v1",
+                body=configuration,
+                headers={"Idempotency-Key": "destinations-prepare-1", "Content-Type": "application/json"},
+            )
+            self.assertEqual(configured[0], 200, configured[1])
+            self.assertNotIn("secret-a", configured[1])
+            configured_replay = call(
+                "PUT", "/v1/programs/program-a/destinations/destinations-v1",
+                body=configuration,
+                headers={"Idempotency-Key": "destinations-prepare-1", "Content-Type": "application/json"},
+            )
+            self.assertEqual(configured_replay[0], 200)
+            self.assertTrue(json.loads(configured_replay[1])["duplicate"])
             unprepared = call(
-                "POST", "/v1/programs/program-a/session/start",
+                "POST", "/v1/programs/program-a/session/start", body=selection,
                 headers={"Idempotency-Key": "start-0", "X-Command-Sequence": "1", "X-Filler-Version": "missing"},
             )
             self.assertEqual(unprepared[0], 409)
@@ -185,13 +225,34 @@ class FillerStoreRuntimeTest(unittest.TestCase):
                 self.assertEqual(status, 200, response)
                 self.assertNotIn("downloadUrl", response)
             started = call(
-                "POST", "/v1/programs/program-a/session/start",
+                "POST", "/v1/programs/program-a/session/start", body=selection,
                 headers={"Idempotency-Key": "start-1", "X-Command-Sequence": "1", "X-Filler-Version": "v1"},
             )
             self.assertEqual(started[0], 200)
+            secrets.unlink()
+            still_running = call("GET", "/v1/programs/program-a/session")
+            self.assertEqual(still_running[0], 200)
+            self.assertEqual(json.loads(still_running[1])["requestedState"], "started")
+            changed_selection = {
+                "version": "destinations-v2",
+                "destinations": [
+                    {"id": "another-opaque-id", "secretId": "secret-a", "versionId": "version-a"}
+                ],
+            }
+            changed = call(
+                "POST", "/v1/programs/program-a/session/start", body=changed_selection,
+                headers={"Idempotency-Key": "start-changed", "X-Command-Sequence": "2", "X-Filler-Version": "v1"},
+            )
+            self.assertEqual(changed[0], 409)
+            reconfigured_active = call(
+                "PUT", "/v1/programs/program-a/destinations/destinations-v2",
+                body={"commandId": "destinations-prepare-2", **changed_selection},
+                headers={"Idempotency-Key": "destinations-prepare-2", "Content-Type": "application/json"},
+            )
+            self.assertEqual(reconfigured_active[0], 409)
             switched = call(
-                "POST", "/v1/programs/program-a/session/start",
-                headers={"Idempotency-Key": "start-2", "X-Command-Sequence": "2", "X-Filler-Version": "v2"},
+                "POST", "/v1/programs/program-a/session/start", body=selection,
+                headers={"Idempotency-Key": "start-2", "X-Command-Sequence": "3", "X-Filler-Version": "v2"},
             )
             self.assertEqual(switched[0], 409)
             metrics = call("GET", "/metrics")

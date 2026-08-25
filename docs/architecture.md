@@ -43,8 +43,9 @@ session, supervisors switch to filler and wait for the publisher to return.
 
 ## State directory layout
 
-`/run/croccante` is root-owned and holds destination URLs, pid files and
-supervisor state.
+`/run/croccante` is root-owned and holds ephemeral destination URLs, pid files,
+and supervisor state. URLs are removed on Stop and never enter the durable
+filler store or command records.
 
 `/run/croccante/hooks` is owned by the **nginx worker user**, because
 `exec_publish` hooks run as that user and must be able to write the publisher
@@ -74,7 +75,7 @@ nginx user; relay ffmpeg processes belong to root. A hook cannot signal them.
 Each supervisor therefore runs a watchdog alongside its ffmpeg that kills the
 child once the publisher marker disappears.
 
-## RTMPS, and why stunnel is gone
+## RTMPS and the process-argument boundary
 
 This image used to run stunnel as a sidecar to wrap Facebook's RTMPS ingest,
 because nginx-rtmp's `push` speaks only plain RTMP.
@@ -89,14 +90,18 @@ ffmpeg build supports `rtmps://` natively. Verified as follows.
   RTMP recorder) and asserts that a `rtmps://` destination receives real bytes.
   That test passes.
 
-So a Facebook destination is now just another URL:
-`rtmps://live-api-s.facebook.com:443/rtmp/<key>`.
+The resolved URL cannot be placed in ffmpeg's argv: `/proc/<pid>/cmdline` would
+then expose the stream key. Each supervisor instead launches ffmpeg with a
+fixed loopback placeholder and supplies the real URL in private process state.
+`croccante-destination-shim.so` intercepts libavformat's `avio_open2` boundary
+and substitutes that value only when the outbound protocol is opened. This
+preserves ffmpeg's native RTMP/RTMPS behavior, retry exit codes, and independent
+supervision while keeping complete destinations out of process arguments.
 
-Final confirmation against Facebook's real ingest needs a real key and has not
-been done — see the open item in [operations.md](operations.md). If it ever
-turns out that a specific platform needs stunnel, the generic destination model
-already supports it: run stunnel beside the container and point a
-`RELAY_DEST_n` at its local port.
+The shim accepts only Croccante's fixed placeholder. It does not alter input
+URLs or arbitrary ffmpeg I/O. The dedicated container runs these processes as
+root because the root-only runtime files and process environment are the active
+session's secret boundary. Stop terminates the process and removes the files.
 
 ## Healthcheck
 
@@ -172,9 +177,14 @@ connection is an observation, never an implicit Start or Stop.
   child publisher and returns to idle within its one-second watch interval.
 - the next Start creates a fresh UUID session without restarting the container.
 
-The controller serializes commands, records idempotency results, and rejects a
-sequence number that is not newer than the last accepted command. This prevents
-late network delivery from reopening a session after a newer Stop.
+The controller first parses and resolves the entire bounded selection. Only
+after all references and resolved URLs validate does it create every supervisor;
+any startup failure rolls the set back. It then records the session marker,
+filler version, configuration version/hash/count, and opaque IDs. References,
+URLs, and keys never enter command records. The resolved selection is immutable
+until explicit Stop. The controller serializes commands and rejects a sequence
+number that is not newer than the last accepted command, preventing late
+delivery from reopening a session after a newer Stop.
 
 ## Private control boundary
 

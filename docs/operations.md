@@ -11,14 +11,13 @@ sudo mkdir -p /opt/croccante
 sudo chown $USER /opt/croccante
 mkdir -p /opt/croccante/fillers
 
-# 2. Destination configuration. This file is the ONLY copy of your stream keys.
-cp .env.example /opt/croccante/.env
-chmod 600 /opt/croccante/.env
-$EDITOR /opt/croccante/.env
-
-# Independent machine credential used only by Alana. Transfer it through the
-# approved secret channel; do not paste it into shell history or .env.
+# 2. Independent machine credential used only by Alana. Transfer it through
+# the approved secret channel; do not paste it into shell history.
 install -m 600 /secure/input/croccante-control-token /opt/croccante/control-token
+
+# 3. If this host has no workload role, install the dedicated Croccante AWS
+# credential. Its IAM principal must have only the policy described below.
+install -m 600 /secure/input/croccante-aws-credentials /opt/croccante/aws-credentials
 ```
 
 No manual `docker login` is needed on the server. The deploy workflow logs in
@@ -70,20 +69,36 @@ The deploy fails if the new container does not reach `healthy`.
 > real server, because croccante has never been deployed. Record the figure from
 > the first real deploy here.
 
-## Updating stream keys
+## Destination secrets and IAM
 
-Keys live only in `/opt/croccante/.env`. No image rebuild is needed.
+There is no production destination `.env` file. Store each destination in AWS
+Secrets Manager as a JSON object with exactly this allowlist:
 
-```bash
-ssh user@server
-$EDITOR /opt/croccante/.env
-docker restart croccante
+```json
+{"scheme":"rtmps","host":"ingest.example","port":443,"application":"live","streamKey":"replace-in-secrets-manager"}
 ```
 
-A restart interrupts a live broadcast. Rotate between streams.
+The Croccante runtime principal needs only `secretsmanager:GetSecretValue` for
+the approved destination secret ARNs. It does not need list, create, update, or
+delete access. Scope the resource list to the program's approved secrets; if a
+customer-managed KMS key protects them, add only `kms:Decrypt` for that key.
+Prefer a workload/instance role. The deployment's root-readable AWS credential
+file is the fallback for a host without workload identity and should contain a
+dedicated, equally restricted principal.
 
-Moving keys off this file and into a secrets manager is
-[G-180](https://linear.app/gaulatti/issue/G-180).
+Alana must send both `secretId` and the exact immutable `versionId`. Croccante
+does not request `AWSCURRENT`, cache a last-known-good configuration, or poll
+for changes. Updating a secret creates a new version but cannot mutate a
+running relay. Apply rotation only as:
+
+1. explicit Stop;
+2. optional stopped reconfiguration validation;
+3. Start with a new configuration version and exact secret version IDs.
+
+If Secrets Manager is unavailable before Start, Start fails with a bounded
+`secret_unavailable` diagnostic and no destination worker is created. An
+already running session does not call Secrets Manager again and continues from
+its ephemeral resolved runtime state.
 
 ## Lifecycle control API
 
@@ -96,6 +111,7 @@ Alana supplies the mounted bearer token and the exact configured program ID.
 | `GET /v1/programs/{programId}/session` | Authoritative requested/actual state, session timestamps, publisher presence, mode, destination health, and last command result. |
 | `POST /v1/programs/{programId}/session/start` | Open or idempotently retain the session. |
 | `POST /v1/programs/{programId}/session/stop` | End all public destination sessions and return to idle. |
+| `PUT /v1/programs/{programId}/destinations/{version}` | While stopped, idempotently resolve and validate an exact destination selection without retaining the resolved URLs. |
 | `PUT /v1/programs/{programId}/fillers/{version}` | Idempotently download, checksum, transcode, validate, and atomically prepare an immutable version. |
 | `GET /v1/programs/{programId}/fillers/{version}` | Revalidate and report one prepared version after restart or retry. |
 | `GET /metrics` | Authenticated private preparation counters and version inventory. |
@@ -107,8 +123,25 @@ different accepted command returns `409`, so a delayed Start cannot undo a
 newer Stop.
 
 Start additionally requires `X-Filler-Version`; the named version must already
-be ready for this program. Preparation requires an `Idempotency-Key` equal to
-the payload's bounded `commandId`:
+be ready for this program. Its JSON body is the exact destination selection:
+
+```json
+{
+  "version": "destinations-2026-08-25.1",
+  "destinations": [
+    {"id":"primary","secretId":"broadcast/example/primary","versionId":"00000000-0000-0000-0000-000000000000"}
+  ]
+}
+```
+
+The list is bounded to 1-20 entries. IDs are opaque and unique. Unknown fields,
+unsupported schemes, malformed values, duplicate IDs or resolved URLs, and any
+unresolved exact version reject the whole Start before public output exists.
+The response and command record contain only version, selection hash, count,
+and opaque IDs.
+
+Preparation requires an `Idempotency-Key` equal to the payload's bounded
+`commandId`:
 
 ```json
 {
@@ -145,8 +178,24 @@ curl --fail-with-body \
   -H 'Idempotency-Key: alana-command-123' \
   -H 'X-Command-Sequence: 123' \
   -H 'X-Filler-Version: filler-v7' \
+  -H 'Content-Type: application/json' \
+  --data '{"version":"destinations-2026-08-25.1","destinations":[{"id":"primary","secretId":"broadcast/example/primary","versionId":"00000000-0000-0000-0000-000000000000"}]}' \
   -X POST \
   http://croccante:8081/v1/programs/example-program/session/start
+```
+
+Stopped validation uses the same selection plus a bounded `commandId` matching
+the idempotency key. It resolves every exact reference, discards the URLs, and
+returns a redacted record. Reusing the key with different content returns 409:
+
+```bash
+curl --fail-with-body \
+  -H "Authorization: Bearer $(< /run/secrets/croccante-control-token)" \
+  -H 'Idempotency-Key: alana-destination-check-124' \
+  -H 'Content-Type: application/json' \
+  --data '{"commandId":"alana-destination-check-124","version":"destinations-2026-08-25.1","destinations":[{"id":"primary","secretId":"broadcast/example/primary","versionId":"00000000-0000-0000-0000-000000000000"}]}' \
+  -X PUT \
+  http://croccante:8081/v1/programs/example-program/destinations/destinations-2026-08-25.1
 ```
 
 Filler continues for a missing publisher until explicit Stop. If Alana or the
@@ -211,8 +260,8 @@ nginx's own view of connected clients:
 docker exec croccante wget -qO- http://127.0.0.1:8080/stat
 ```
 
-Destination URLs are masked in logs (`rtmp://host/live2/***`), so logs are safe
-to paste.
+Logs identify destinations only by their opaque bounded IDs. They do not print
+resolved hosts, URLs, secret references, or keys.
 
 | Symptom | Likely cause |
 |---------|--------------|
@@ -222,7 +271,7 @@ to paste.
 | API returns `401` | Alana's mounted token does not match Croccante's control-token file. Rotate both sides through the approved secret path. |
 | `/metrics` returns `401` | The scraper token is missing or differs from Croccante's control-token file. |
 | API returns `409` | The command sequence is stale or reordered. Read state and retry only the intended newer command with a higher sequence. |
-| One destination in `backoff`, others fine | Bad or revoked key, or that platform is refusing the connection. Check the URL. |
+| One destination in `backoff`, others fine | Bad or revoked key, or that platform is refusing the connection. Verify the referenced secret version outside Croccante. |
 | All destinations `backoff` | Server lost egress, or the publisher is sending something no destination accepts. |
 | `nginx reports N publisher(s) but no publisher marker` | The `exec_publish` hook cannot write its state directory. Check ownership of `/run/croccante/hooks`. |
 | Relay retry alerts fire | Inspect `croccante_relay_slot_state`, retry/result totals, and current backoff, then verify the corresponding destination configuration locally. Metrics deliberately omit its URL and key. |

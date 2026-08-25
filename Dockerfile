@@ -1,3 +1,10 @@
+FROM alpine:3.21 AS destination-shim-builder
+
+RUN apk add --no-cache build-base
+COPY destination_url_shim.c /tmp/destination_url_shim.c
+RUN cc -shared -fPIC -O2 -Wall -Wextra -Werror \
+        -o /tmp/croccante-destination-shim.so /tmp/destination_url_shim.c -ldl
+
 FROM alpine:3.21
 
 ARG BUILD_VERSION=development
@@ -11,6 +18,7 @@ RUN apk add --no-cache \
         nginx-mod-rtmp \
         ffmpeg \
         python3 \
+        py3-boto3 \
         ca-certificates \
     && update-ca-certificates \
     && mkdir -p /var/log/nginx /run/nginx
@@ -22,6 +30,9 @@ COPY relay-start.sh    /usr/local/bin/relay-start.sh
 COPY relay-stop.sh     /usr/local/bin/relay-stop.sh
 COPY healthcheck.sh    /usr/local/bin/healthcheck.sh
 COPY control-server.py /usr/local/bin/control-server.py
+COPY destination_store.py /usr/local/bin/destination_store.py
+COPY destination_runtime.py /usr/local/bin/destination_runtime.py
+COPY --from=destination-shim-builder /tmp/croccante-destination-shim.so /usr/local/lib/croccante-destination-shim.so
 COPY relay_metrics.py  /usr/local/bin/relay_metrics.py
 COPY filler_store.py   /usr/local/bin/filler_store.py
 COPY entrypoint.sh     /entrypoint.sh

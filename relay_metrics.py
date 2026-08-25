@@ -15,7 +15,7 @@ DESTINATION_STATES = frozenset(
     {"idle", "waiting", "relaying", "filler", "backoff", "unknown"}
 )
 CONTROL_METHODS = frozenset({"GET", "POST", "PUT"})
-CONTROL_ROUTES = frozenset({"metrics", "session", "filler", "start", "stop", "unknown"})
+CONTROL_ROUTES = frozenset({"metrics", "session", "filler", "destinations", "start", "stop", "unknown"})
 CONTROL_RESULTS = frozenset(
     {
         "success",

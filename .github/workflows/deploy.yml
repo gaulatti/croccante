@@ -90,12 +90,14 @@ jobs:
           GHCR_USER:  ${{ github.repository_owner }}
           IMAGE_REF:  ${{ env.IMAGE }}:${{ github.sha }}
           IMAGE_LATEST: ${{ env.IMAGE }}:latest
+          PROGRAM_ID: ${{ vars.PROGRAM_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
         with:
           host:        ${{ secrets.SERVER_HOST }}
           username:    ${{ secrets.SERVER_USER }}
           key:         ${{ secrets.SERVER_SSH_KEY }}
           fingerprint: ${{ secrets.SERVER_SSH_FINGERPRINT }}
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE_REF,IMAGE_LATEST
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE_REF,IMAGE_LATEST,PROGRAM_ID,AWS_REGION
           script: |
             set -eu
 
@@ -109,6 +111,9 @@ jobs:
             docker pull "$IMAGE_REF"
             docker tag  "$IMAGE_REF" "$IMAGE_LATEST"
             test -s /opt/croccante/control-token
+            test -s /opt/croccante/aws-credentials
+            test -n "$PROGRAM_ID"
+            test -n "$AWS_REGION"
             mkdir -p /opt/croccante/fillers
             docker network inspect broadcast-control >/dev/null 2>&1 || docker network create broadcast-control >/dev/null
 
@@ -120,8 +125,13 @@ jobs:
               --name croccante \
               --restart unless-stopped \
               --network broadcast-control \
-              --env-file /opt/croccante/.env \
+              -e PROGRAM_ID="$PROGRAM_ID" \
+              -e AWS_REGION="$AWS_REGION" \
+              -e CROCCANTE_ENVIRONMENT=production \
+              -e DESTINATION_SECRET_PROVIDER=aws \
+              -e AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws-credentials \
               --mount type=bind,src=/opt/croccante/control-token,dst=/run/secrets/croccante-control-token,readonly \
+              --mount type=bind,src=/opt/croccante/aws-credentials,dst=/run/secrets/aws-credentials,readonly \
               --mount type=bind,src=/opt/croccante/fillers,dst=/var/lib/croccante/fillers \
               -p 127.0.0.1:1935:1935 \
               "$IMAGE_REF" >/dev/null

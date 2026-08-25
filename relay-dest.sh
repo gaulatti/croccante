@@ -3,7 +3,9 @@
 #
 # Invoked as: relay-dest.sh <index>
 # Reads its destination URL from $STATE_DIR/dest-<index>.url so no key material
-# is ever baked into a generated script or passed on the command line.
+# is ever baked into a generated script or passed on the command line. A tiny
+# libavformat boundary shim replaces the harmless loopback output placeholder
+# from private process state only when ffmpeg opens its outbound connection.
 #
 # Lifecycle:
 #   idle      — explicitly stopped; nothing is pushed
@@ -27,7 +29,9 @@ STATE_FILE="$STATE_DIR/dest-$IDX.state"
 FFMPEG_PID_FILE="$STATE_DIR/dest-$IDX.ffmpeg.pid"
 
 DST=$(cat "$URL_FILE")
-MASKED=$(mask_dest "$DST")
+DEST_ID=$(cat "$STATE_DIR/dest-$IDX.id")
+OUTPUT_PLACEHOLDER="rtmp://127.0.0.1:1/croccante-destination/$IDX"
+DESTINATION_SHIM="/usr/local/lib/croccante-destination-shim.so"
 
 RW_TIMEOUT="${RELAY_RW_TIMEOUT:-10000000}"
 BACKOFF_MAX="${RELAY_BACKOFF_MAX:-30}"
@@ -54,7 +58,7 @@ cleanup() {
 }
 trap cleanup TERM INT
 
-log "supervisor up, destination: $MASKED"
+log "supervisor up, destination id: $DEST_ID"
 set_state idle
 
 while true; do
@@ -78,7 +82,7 @@ while true; do
     if [ -n "${STREAM:-}" ]; then
         MODE=relaying
         SRC="rtmp://127.0.0.1:1935/$RTMP_APP/$STREAM"
-        log "relaying $SRC -> $MASKED"
+        log "relaying source to destination id: $DEST_ID"
     else
         MODE=filler
         SRC=$(active_filler_file) || {
@@ -87,7 +91,7 @@ while true; do
             sleep 1
             continue
         }
-        log "publisher gone; filling -> $MASKED"
+        log "publisher gone; filling destination id: $DEST_ID"
     fi
     set_state "$MODE"
     metric_inc "dest-$IDX.attempt.total"
@@ -107,19 +111,21 @@ while true; do
         # -re paces the file at realtime; without it ffmpeg would blast the
         # whole loop at the destination as fast as the socket accepts it.
         # +genpts keeps timestamps monotonic across loop wraps.
-        ffmpeg -hide_banner -loglevel warning \
+        CROCCANTE_DESTINATION_URL="$DST" LD_PRELOAD="$DESTINATION_SHIM" \
+        ffmpeg -hide_banner -loglevel quiet \
             -re -stream_loop -1 -fflags +genpts \
             -i "$SRC" \
             -c copy \
             -rw_timeout "$RW_TIMEOUT" \
-            -f flv "$DST" &
+            -f flv "$OUTPUT_PLACEHOLDER" &
     else
-        ffmpeg -hide_banner -loglevel warning \
+        CROCCANTE_DESTINATION_URL="$DST" LD_PRELOAD="$DESTINATION_SHIM" \
+        ffmpeg -hide_banner -loglevel quiet \
             -rw_timeout "$RW_TIMEOUT" \
             -i "$SRC" \
             -c copy \
             -rw_timeout "$RW_TIMEOUT" \
-            -f flv "$DST" &
+            -f flv "$OUTPUT_PLACEHOLDER" &
     fi
     ff=$!
     atomic_write "$FFMPEG_PID_FILE" "$ff"
