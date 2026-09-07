@@ -273,7 +273,7 @@ resolved hosts, URLs, secret references, or keys.
 | API returns `409` | The command sequence is stale or reordered. Read state and retry only the intended newer command with a higher sequence. |
 | One destination in `backoff`, others fine | Bad or revoked key, or that platform is refusing the connection. Verify the referenced secret version outside Croccante. |
 | All destinations `backoff` | Server lost egress, or the publisher is sending something no destination accepts. |
-| `nginx reports N publisher(s) but no publisher marker` | The `exec_publish` hook cannot write its state directory. Check ownership of `/run/croccante/hooks`. |
+| `nginx reports N publisher(s) but no publisher marker` | The `exec_publish` hook cannot reach its state directory. Check that `/run/croccante` is root-owned `0710` with group `nginx`, `/run/croccante/hooks` is nginx-writable, and the root-owned `control` subtree is not readable by nginx. |
 | Relay retry alerts fire | Inspect `croccante_relay_slot_state`, retry/result totals, and current backoff, then verify the corresponding destination configuration locally. Metrics deliberately omit its URL and key. |
 | Relays time out with no data, `nclients` stays 0 | `worker_processes` is not 1. See architecture.md. |
 | Healthcheck fine, no bytes at the platform | Publisher connected but the destination silently drops it — verify the key. |
@@ -293,3 +293,27 @@ detection. No real platform account is involved.
 Manual verification against a real YouTube broadcast is still required before
 trusting a change in production — the harness proves the relay mechanics, not
 that a given platform accepts the stream.
+
+### Smoke failure signature: publisher visible, destinations waiting
+
+If nginx's `/stat` response shows the publisher and incoming bytes advancing,
+but every destination remains `waiting`, the sink byte counts stay at zero,
+and `hooks/hooks.log` is empty, inspect the hook boundary before debugging
+ffmpeg or destination credentials:
+
+```bash
+docker exec croccante stat -c '%U:%G %a %n' \
+  /run/croccante /run/croccante/hooks \
+  /run/croccante/metrics /run/croccante/metrics/hooks
+docker exec --user nginx croccante sh -c '
+  test -x /run/croccante &&
+  test -w /run/croccante/hooks &&
+  test -w /run/croccante/metrics/hooks &&
+  ! test -r /run/croccante/control/requested.state
+'
+```
+
+The expected parent mode is root-owned `0710` with group `nginx`; only the two
+hook leaves are nginx-writable. A root-owned `0700` parent makes
+`exec_publish` fail silently even when the leaf ownership is correct. Do not
+make the control tree readable as a workaround.

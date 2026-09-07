@@ -28,6 +28,11 @@ atomic_write "$STATE_DIR/dest.count" 0
 # The exec_publish hooks run as the nginx worker user, so they need a directory
 # they can write. Everything else stays root-owned. Getting this wrong makes the
 # hooks fail silently, because nginx discards their output.
+# Grant nginx search-only access to the two root-owned parent directories. The
+# hook can reach its writable leaves without listing or reading control state,
+# destination URLs, process state, or other root-owned files.
+chgrp nginx "$STATE_DIR" "$METRICS_DIR"
+chmod 0710 "$STATE_DIR" "$METRICS_DIR"
 chown nginx:nginx "$HOOK_DIR"
 chmod 0775 "$HOOK_DIR"
 chown nginx:nginx "$METRICS_DIR/hooks"

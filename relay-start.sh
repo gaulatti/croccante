@@ -14,9 +14,9 @@ metric_inc "hooks/publisher-connect.total"
 
 atomic_write "$PUBLISHER_FILE" "${1:-}"
 
-# A publisher never starts a session. If an authenticated Start is already in
-# force, remember that this session has carried live media so a later gap uses
-# filler. A publisher connected while stopped remains withheld.
-if session_started; then
-    atomic_write "$PUBLISHER_SEEN_FILE" "$(date +%s)"
-fi
+# A publisher never starts a session. Remember the observation here without
+# granting the nginx worker read access to root-owned lifecycle state. The
+# authenticated controller clears this marker on every Start and Stop boundary,
+# then restores it during Start only when a publisher is currently connected.
+# A publisher connected while stopped therefore remains withheld.
+atomic_write "$PUBLISHER_SEEN_FILE" "$(date +%s)"

@@ -14,8 +14,8 @@ PUBLISHER_FILE="$HOOK_DIR/publisher"
 # file instead. entrypoint.sh tails it onto the container's stdout.
 HOOK_LOG="$HOOK_DIR/hooks.log"
 
-# Root-owned explicit lifecycle state. Publisher hooks may read this directory
-# but only the authenticated control server writes it.
+# Root-owned explicit lifecycle state. Publisher hooks cannot read this
+# directory; only the authenticated control server reads and writes it.
 CONTROL_DIR="$STATE_DIR/control"
 REQUESTED_STATE_FILE="$CONTROL_DIR/requested.state"
 SESSION_FILE="$CONTROL_DIR/session.id"
