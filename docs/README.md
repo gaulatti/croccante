@@ -15,3 +15,4 @@ behind:
 |------|-----------|
 | `architecture.md` | Architecture |
 | `operations.md`   | Operations |
+| `recording-contract.md` | Recording Contract |

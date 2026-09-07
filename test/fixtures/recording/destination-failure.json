@@ -1,0 +1,44 @@
+{
+  "contractVersion": "croccante.recording-session/v1",
+  "sessionId": "55555555-5555-4555-8555-555555555555",
+  "configurationHash": "4444444444444444444444444444444444444444444444444444444444444444",
+  "state": "partial",
+  "openedAt": "2026-09-07T04:00:00Z",
+  "closedAt": "2026-09-07T04:00:00.700Z",
+  "transitions": [
+    {"sequence": 1, "state": "pending", "at": "2026-09-07T04:00:00Z", "reasonCode": null},
+    {"sequence": 2, "state": "recording", "at": "2026-09-07T04:00:00.100Z", "reasonCode": null},
+    {"sequence": 3, "state": "finalizing", "at": "2026-09-07T04:00:00.600Z", "reasonCode": null},
+    {"sequence": 4, "state": "partial", "at": "2026-09-07T04:00:00.700Z", "reasonCode": "destination_unavailable"}
+  ],
+  "capture": {
+    "profile": {"container": "wav", "video": null, "audio": {"codec": "pcm_s16le", "sampleRateHz": 8000, "channels": 1}, "timeBase": "milliseconds"},
+    "elapsedDurationMs": 220,
+    "capturedDurationMs": 220,
+    "droppedFrames": 1,
+    "sourceTimeline": [
+      {"sequence": 1, "startedOffsetMs": 0, "mode": "live"},
+      {"sequence": 2, "startedOffsetMs": 100, "mode": "filler"},
+      {"sequence": 3, "startedOffsetMs": 180, "mode": "live"}
+    ],
+    "segments": [
+      {"kind": "segment", "sequence": 1, "storageKey": "artifacts/segment-000001.wav", "startedOffsetMs": 0, "durationMs": 100, "byteLength": 1644, "sha256": "dbf4734838892d8ac9e35fb8203e39c27e4db3f8c1403d811010ce0a68b18b2f"},
+      {"kind": "segment", "sequence": 2, "storageKey": "artifacts/segment-000002.wav", "startedOffsetMs": 100, "durationMs": 120, "byteLength": 1964, "sha256": "022bacc7fc10092dffbaf369b2cf1ec8f41b8a49c41b235e2cc57eab54a486c8"}
+    ],
+    "finalArtifact": {"kind": "final", "storageKey": "artifacts/final.wav", "durationMs": 220, "byteLength": 3564, "sha256": "e76b53795093a4390f5a47290dc01d106b71d3697b78ae343ceca9bf52443652"}
+  },
+  "destinations": [
+    {"slot": 1, "finalStatus": "accepted", "attempts": [
+      {"sequence": 1, "startedAt": "2026-09-07T04:00:00.100Z", "endedAt": "2026-09-07T04:00:00.650Z", "status": "accepted", "observedBytes": 5000, "errorCode": null}
+    ]},
+    {"slot": 2, "finalStatus": "failed", "attempts": [
+      {"sequence": 1, "startedAt": "2026-09-07T04:00:00.100Z", "endedAt": "2026-09-07T04:00:00.300Z", "status": "failed", "observedBytes": 0, "errorCode": "destination_unavailable"},
+      {"sequence": 2, "startedAt": "2026-09-07T04:00:00.400Z", "endedAt": "2026-09-07T04:00:00.650Z", "status": "failed", "observedBytes": 0, "errorCode": "destination_unavailable"}
+    ]}
+  ],
+  "errors": [
+    {"sequence": 1, "at": "2026-09-07T04:00:00.300Z", "phase": "delivery", "code": "destination_unavailable", "retryable": true},
+    {"sequence": 2, "at": "2026-09-07T04:00:00.650Z", "phase": "delivery", "code": "destination_unavailable", "retryable": true}
+  ],
+  "retention": {"classification": "public-broadcast", "deleteAfter": "2026-10-07T04:00:00Z", "legalHold": false}
+}
