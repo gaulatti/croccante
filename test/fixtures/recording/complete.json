@@ -1,0 +1,35 @@
+{
+  "contractVersion": "croccante.recording-session/v1",
+  "sessionId": "11111111-1111-4111-8111-111111111111",
+  "configurationHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "state": "complete",
+  "openedAt": "2026-09-07T00:00:00Z",
+  "closedAt": "2026-09-07T00:00:00.500Z",
+  "transitions": [
+    {"sequence": 1, "state": "pending", "at": "2026-09-07T00:00:00Z", "reasonCode": null},
+    {"sequence": 2, "state": "recording", "at": "2026-09-07T00:00:00.100Z", "reasonCode": null},
+    {"sequence": 3, "state": "finalizing", "at": "2026-09-07T00:00:00.400Z", "reasonCode": null},
+    {"sequence": 4, "state": "complete", "at": "2026-09-07T00:00:00.500Z", "reasonCode": null}
+  ],
+  "capture": {
+    "profile": {"container": "wav", "video": null, "audio": {"codec": "pcm_s16le", "sampleRateHz": 8000, "channels": 1}, "timeBase": "milliseconds"},
+    "elapsedDurationMs": 200,
+    "capturedDurationMs": 200,
+    "droppedFrames": 0,
+    "sourceTimeline": [
+      {"sequence": 1, "startedOffsetMs": 0, "mode": "live"}
+    ],
+    "segments": [
+      {"kind": "segment", "sequence": 1, "storageKey": "artifacts/segment-000001.wav", "startedOffsetMs": 0, "durationMs": 100, "byteLength": 1644, "sha256": "dbf4734838892d8ac9e35fb8203e39c27e4db3f8c1403d811010ce0a68b18b2f"},
+      {"kind": "segment", "sequence": 2, "storageKey": "artifacts/segment-000002.wav", "startedOffsetMs": 100, "durationMs": 100, "byteLength": 1644, "sha256": "a37b6d61cc013cee1ff933eb18e93594408af3bf16172226ed35ee284c927b65"}
+    ],
+    "finalArtifact": {"kind": "final", "storageKey": "artifacts/final.wav", "durationMs": 200, "byteLength": 3244, "sha256": "8de23df2f02faa74264eb6e197e16beab1b143be15d0f4f8508444dd0e7cfb48"}
+  },
+  "destinations": [
+    {"slot": 1, "finalStatus": "accepted", "attempts": [
+      {"sequence": 1, "startedAt": "2026-09-07T00:00:00.100Z", "endedAt": "2026-09-07T00:00:00.450Z", "status": "accepted", "observedBytes": 5000, "errorCode": null}
+    ]}
+  ],
+  "errors": [],
+  "retention": {"classification": "public-broadcast", "deleteAfter": "2026-10-07T00:00:00Z", "legalHold": false}
+}

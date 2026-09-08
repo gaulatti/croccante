@@ -59,6 +59,12 @@ session never switches versions.
 The machine contract and example requests are documented in
 [docs/operations.md](docs/operations.md#lifecycle-control-api).
 
+The versioned, credential-free contract for future as-aired recording manifests
+and bounded operator reports is documented in
+[docs/recording-contract.md](docs/recording-contract.md). This defines the
+fixture-backed boundary only; runtime capture and production wiring remain in
+[issue #17](https://github.com/gaulatti/croccante/issues/17).
+
 The same private listener exposes authenticated Prometheus metrics at
 `GET /metrics`. It reports container process, publisher, relay, retry,
 backoff, filler, and control-request behavior using bounded labels only. The
@@ -99,11 +105,14 @@ docker run --rm -p 1935:1935 \
 
 ```bash
 python3 test/test_filler_store.py -v
+python3 test/test_recording_manifest.py -v
 ./test/smoke.sh
 ```
 
 The first command performs real local ffmpeg/ffprobe preparation for image,
 silent video, and WebM-with-audio sources plus API/state recovery tests. The
+second validates the versioned recording schema, synthetic media fixtures,
+lifecycle invariants, checksums, and bounded redacted reports. The
 smoke harness brings up local RTMP and RTMPS sinks, runs the relay, and asserts
 on actual relayed bytes plus authenticated lifecycle and metrics behavior.
 Needs Docker.
@@ -127,6 +136,8 @@ croccante/
 ├── healthcheck.sh       # Relay-aware container healthcheck
 ├── control-server.py    # Authenticated, program-scoped Start/Stop/state API
 ├── relay_metrics.py     # Bounded Prometheus collector for private scraping
+├── recording_manifest.py # Versioned recording manifest validation and reports
+├── contracts/           # Closed machine-readable recording contract schemas
 ├── filler_store.py      # Durable immutable source preparation and validation
 ├── docs/                # Architecture and operations (destined for the wiki)
 ├── test/smoke.sh        # End-to-end harness against local sinks

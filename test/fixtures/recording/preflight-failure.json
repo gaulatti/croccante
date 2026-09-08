@@ -1,0 +1,28 @@
+{
+  "contractVersion": "croccante.recording-session/v1",
+  "sessionId": "77777777-7777-4777-8777-777777777777",
+  "configurationHash": "6666666666666666666666666666666666666666666666666666666666666666",
+  "state": "failed",
+  "openedAt": "2026-09-07T06:00:00Z",
+  "closedAt": "2026-09-07T06:00:00Z",
+  "transitions": [
+    {"sequence": 1, "state": "pending", "at": "2026-09-07T06:00:00Z", "reasonCode": null},
+    {"sequence": 2, "state": "failed", "at": "2026-09-07T06:00:00Z", "reasonCode": "storage_io"}
+  ],
+  "capture": {
+    "profile": {"container": "wav", "video": null, "audio": {"codec": "pcm_s16le", "sampleRateHz": 8000, "channels": 1}, "timeBase": "milliseconds"},
+    "elapsedDurationMs": 0,
+    "capturedDurationMs": 0,
+    "droppedFrames": 0,
+    "sourceTimeline": [],
+    "segments": [],
+    "finalArtifact": null
+  },
+  "destinations": [
+    {"slot": 1, "finalStatus": "not_attempted", "attempts": []}
+  ],
+  "errors": [
+    {"sequence": 1, "at": "2026-09-07T06:00:00Z", "phase": "storage", "code": "storage_io", "retryable": false}
+  ],
+  "retention": {"classification": "internal", "deleteAfter": "2026-09-14T06:00:00Z", "legalHold": false}
+}
