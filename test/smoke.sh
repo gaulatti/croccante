@@ -257,6 +257,16 @@ wait_for_control_mode() { # mode, timeout
     return 1
 }
 
+wait_for_publisher_marker() { # timeout
+    for _ in $(seq 1 "${1:-10}"); do
+        docker exec croccante-under-test sh -c \
+            'test "$(cat /run/croccante/hooks/publisher 2>/dev/null)" = test' \
+            >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    return 1
+}
+
 # Teardown is bounded by nginx drop_idle_publisher (10s) plus the supervisor
 # watchdog poll, so poll rather than guessing a sleep.
 wait_for_idle() {
@@ -284,6 +294,19 @@ sleep 2
 check "container stays healthy while stopped" "$(docker exec croccante-nodest /usr/local/bin/healthcheck.sh >/dev/null 2>&1; echo $?)"
 count=$(docker exec croccante-nodest cat /run/croccante/dest.count | tr -d ' \n')
 check "no destination process exists before Start" "$([ "$count" = 0 ] && echo 0 || echo 1)" "count was $count"
+docker exec --user nginx croccante-nodest sh -c '
+    test -x /run/croccante &&
+    test -w /run/croccante/hooks &&
+    test -w /run/croccante/metrics/hooks &&
+    ! test -r /run/croccante/control/requested.state
+' >/dev/null 2>&1
+hook_permissions=$?
+check "nginx hooks reach only their writable state leaves" "$hook_permissions" \
+    "protected parent directories block hook execution or expose control state"
+if [ "$hook_permissions" -ne 0 ]; then
+    red "critical hook-permission preflight failed; later media assertions would only cascade"
+    exit 1
+fi
 docker rm -f croccante-nodest >/dev/null
 echo
 
@@ -318,6 +341,15 @@ check "metrics omit program, token, stream key, and destination URL" \
     "$(printf '%s' "$authorized_metrics" | grep -qE "$PROGRAM_ID|$TEST_CONTROL_TOKEN|$FAKE_KEY|rtmps?://" && echo 1 || echo 0)"
 
 start_publisher
+wait_for_publisher_marker 10
+publisher_marker=$?
+check "nginx records the connected publisher before lifecycle Start" "$publisher_marker" \
+    "nginx reports a publisher but the exec_publish hook marker is absent"
+if [ "$publisher_marker" -ne 0 ]; then
+    docker logs croccante-under-test 2>&1 | tail -n 50
+    red "critical publisher-hook preflight failed; later media assertions would only cascade"
+    exit 1
+fi
 sleep 4
 count=$(docker exec croccante-under-test cat /run/croccante/dest.count | tr -d ' \n')
 check "connected publisher creates no destinations while stopped" "$([ "$count" = 0 ] && echo 0 || echo 1)" "count was $count"
