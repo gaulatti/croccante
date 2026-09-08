@@ -45,17 +45,27 @@ session, supervisors switch to filler and wait for the publisher to return.
 
 `/run/croccante` is root-owned and holds ephemeral destination URLs, pid files,
 and supervisor state. URLs are removed on Stop and never enter the durable
-filler store or command records.
+filler store or command records. Its mode is `0710`: the nginx group may search
+the directory to reach its hook leaf, but cannot list it. The root-owned
+`control` subtree and its files remain unreadable to nginx.
 
 `/run/croccante/hooks` is owned by the **nginx worker user**, because
 `exec_publish` hooks run as that user and must be able to write the publisher
-marker. Nothing else lives there. This split means a compromised nginx worker
-cannot rewrite where the stream is being sent.
+marker. `/run/croccante/metrics` uses the same search-only parent boundary so
+nginx can reach the writable `metrics/hooks` leaf. Nothing else writable by
+nginx lives in either tree. This split means a compromised nginx worker cannot
+rewrite where the stream is being sent or read the explicit lifecycle state.
 
 nginx discards the stdout of `exec_publish` children, so the hooks log to
 `hooks/hooks.log` and the entrypoint tails that file onto the container's
 stdout. Without this, hook failures are completely silent — which is exactly
 how the permission bug above went unnoticed during development.
+
+The smoke harness checks this boundary before exercising media: as nginx it
+must traverse the two parents and write both hook leaves, while remaining
+unable to read `control/requested.state`. It then connects a publisher while
+stopped and requires the publisher marker before issuing Start. These checks
+fail at the permission fault instead of cascading into zero-byte sink failures.
 
 ## Three constraints that are easy to get wrong
 
