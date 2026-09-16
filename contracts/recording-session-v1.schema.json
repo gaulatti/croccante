@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://croccante.gaulatti.com/contracts/recording-session-v1.schema.json",
+  "title": "Croccante recording session manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "sessionId",
+    "configurationHash",
+    "state",
+    "openedAt",
+    "closedAt",
+    "transitions",
+    "capture",
+    "destinations",
+    "errors",
+    "retention"
+  ],
+  "properties": {
+    "contractVersion": {"const": "croccante.recording-session/v1"},
+    "sessionId": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "configurationHash": {"$ref": "#/$defs/sha256"},
+    "state": {"$ref": "#/$defs/state"},
+    "openedAt": {"$ref": "#/$defs/timestamp"},
+    "closedAt": {"oneOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
+    "transitions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/transition"}
+    },
+    "capture": {"$ref": "#/$defs/capture"},
+    "destinations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {"$ref": "#/$defs/destination"}
+    },
+    "errors": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/error"}
+    },
+    "retention": {"$ref": "#/$defs/retention"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timestamp": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?Z$"},
+    "state": {
+      "enum": ["pending", "recording", "interrupted", "recovering", "finalizing", "complete", "partial", "failed"]
+    },
+    "errorCode": {
+      "enum": [
+        "capture_interrupted",
+        "checksum_mismatch",
+        "destination_rejected",
+        "destination_unavailable",
+        "disk_full",
+        "finalization_failed",
+        "process_crashed",
+        "storage_io"
+      ]
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "state", "at", "reasonCode"],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 1, "maximum": 64},
+        "state": {"$ref": "#/$defs/state"},
+        "at": {"$ref": "#/$defs/timestamp"},
+        "reasonCode": {"oneOf": [{"$ref": "#/$defs/errorCode"}, {"type": "null"}]}
+      }
+    },
+    "mediaName": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$"},
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sequence", "storageKey", "startedOffsetMs", "durationMs", "byteLength", "sha256"],
+      "properties": {
+        "kind": {"const": "segment"},
+        "sequence": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "storageKey": {"type": "string", "pattern": "^artifacts/segment-[0-9]{6}\\.[a-z0-9]{1,8}$"},
+        "startedOffsetMs": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "durationMs": {"type": "integer", "minimum": 1, "maximum": 86400000},
+        "byteLength": {"type": "integer", "minimum": 1, "maximum": 1099511627776},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "finalArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "storageKey", "durationMs", "byteLength", "sha256"],
+      "properties": {
+        "kind": {"const": "final"},
+        "storageKey": {"type": "string", "pattern": "^artifacts/final\\.[a-z0-9]{1,8}$"},
+        "durationMs": {"type": "integer", "minimum": 1, "maximum": 86400000},
+        "byteLength": {"type": "integer", "minimum": 1, "maximum": 1099511627776},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "elapsedDurationMs", "capturedDurationMs", "droppedFrames", "sourceTimeline", "segments", "finalArtifact"],
+      "properties": {
+        "profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["container", "video", "audio", "timeBase"],
+          "properties": {
+            "container": {"$ref": "#/$defs/mediaName"},
+            "video": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["codec", "width", "height", "frameRate"],
+                  "properties": {
+                    "codec": {"$ref": "#/$defs/mediaName"},
+                    "width": {"type": "integer", "minimum": 1, "maximum": 7680},
+                    "height": {"type": "integer", "minimum": 1, "maximum": 4320},
+                    "frameRate": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["numerator", "denominator"],
+                      "properties": {
+                        "numerator": {"type": "integer", "minimum": 1, "maximum": 240000},
+                        "denominator": {"type": "integer", "minimum": 1, "maximum": 1001}
+                      }
+                    }
+                  }
+                },
+                {"type": "null"}
+              ]
+            },
+            "audio": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["codec", "sampleRateHz", "channels"],
+                  "properties": {
+                    "codec": {"$ref": "#/$defs/mediaName"},
+                    "sampleRateHz": {"type": "integer", "minimum": 8000, "maximum": 384000},
+                    "channels": {"type": "integer", "minimum": 1, "maximum": 32}
+                  }
+                },
+                {"type": "null"}
+              ]
+            },
+            "timeBase": {"const": "milliseconds"}
+          }
+        },
+        "elapsedDurationMs": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "capturedDurationMs": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "droppedFrames": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "sourceTimeline": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sequence", "startedOffsetMs", "mode"],
+            "properties": {
+              "sequence": {"type": "integer", "minimum": 1, "maximum": 64},
+              "startedOffsetMs": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+              "mode": {"enum": ["live", "filler", "unobserved"]}
+            }
+          }
+        },
+        "segments": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/segment"}},
+        "finalArtifact": {"oneOf": [{"$ref": "#/$defs/finalArtifact"}, {"type": "null"}]}
+      }
+    },
+    "destinationAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "startedAt", "endedAt", "status", "observedBytes", "errorCode"],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 1, "maximum": 32},
+        "startedAt": {"$ref": "#/$defs/timestamp"},
+        "endedAt": {"oneOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
+        "status": {"enum": ["in_progress", "accepted", "failed", "unknown"]},
+        "observedBytes": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "errorCode": {"oneOf": [{"$ref": "#/$defs/errorCode"}, {"type": "null"}]}
+      }
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot", "finalStatus", "attempts"],
+      "properties": {
+        "slot": {"type": "integer", "minimum": 1, "maximum": 20},
+        "finalStatus": {"enum": ["pending", "not_attempted", "accepted", "failed", "unknown"]},
+        "attempts": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/destinationAttempt"}}
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "at", "phase", "code", "retryable"],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 1, "maximum": 64},
+        "at": {"$ref": "#/$defs/timestamp"},
+        "phase": {"enum": ["capture", "delivery", "finalization", "recovery", "storage"]},
+        "code": {"$ref": "#/$defs/errorCode"},
+        "retryable": {"type": "boolean"}
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "deleteAfter", "legalHold"],
+      "properties": {
+        "classification": {"enum": ["public-broadcast", "internal", "restricted"]},
+        "deleteAfter": {"oneOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
+        "legalHold": {"type": "boolean"}
+      }
+    }
+  }
+}

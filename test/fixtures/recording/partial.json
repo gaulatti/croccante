@@ -1,0 +1,38 @@
+{
+  "contractVersion": "croccante.recording-session/v1",
+  "sessionId": "33333333-3333-4333-8333-333333333333",
+  "configurationHash": "2222222222222222222222222222222222222222222222222222222222222222",
+  "state": "partial",
+  "openedAt": "2026-09-07T02:00:00Z",
+  "closedAt": "2026-09-07T02:00:00.400Z",
+  "transitions": [
+    {"sequence": 1, "state": "pending", "at": "2026-09-07T02:00:00Z", "reasonCode": null},
+    {"sequence": 2, "state": "recording", "at": "2026-09-07T02:00:00.100Z", "reasonCode": null},
+    {"sequence": 3, "state": "interrupted", "at": "2026-09-07T02:00:00.200Z", "reasonCode": "capture_interrupted"},
+    {"sequence": 4, "state": "finalizing", "at": "2026-09-07T02:00:00.300Z", "reasonCode": null},
+    {"sequence": 5, "state": "partial", "at": "2026-09-07T02:00:00.400Z", "reasonCode": "capture_interrupted"}
+  ],
+  "capture": {
+    "profile": {"container": "wav", "video": null, "audio": {"codec": "pcm_s16le", "sampleRateHz": 8000, "channels": 1}, "timeBase": "milliseconds"},
+    "elapsedDurationMs": 200,
+    "capturedDurationMs": 100,
+    "droppedFrames": 4,
+    "sourceTimeline": [
+      {"sequence": 1, "startedOffsetMs": 0, "mode": "live"},
+      {"sequence": 2, "startedOffsetMs": 100, "mode": "unobserved"}
+    ],
+    "segments": [
+      {"kind": "segment", "sequence": 1, "storageKey": "artifacts/segment-000001.wav", "startedOffsetMs": 0, "durationMs": 100, "byteLength": 1644, "sha256": "dbf4734838892d8ac9e35fb8203e39c27e4db3f8c1403d811010ce0a68b18b2f"}
+    ],
+    "finalArtifact": null
+  },
+  "destinations": [
+    {"slot": 1, "finalStatus": "unknown", "attempts": [
+      {"sequence": 1, "startedAt": "2026-09-07T02:00:00.100Z", "endedAt": "2026-09-07T02:00:00.200Z", "status": "unknown", "observedBytes": 1500, "errorCode": "capture_interrupted"}
+    ]}
+  ],
+  "errors": [
+    {"sequence": 1, "at": "2026-09-07T02:00:00.200Z", "phase": "capture", "code": "capture_interrupted", "retryable": false}
+  ],
+  "retention": {"classification": "internal", "deleteAfter": "2026-09-14T02:00:00Z", "legalHold": false}
+}

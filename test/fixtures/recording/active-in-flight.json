@@ -1,0 +1,32 @@
+{
+  "contractVersion": "croccante.recording-session/v1",
+  "sessionId": "66666666-6666-4666-8666-666666666666",
+  "configurationHash": "5555555555555555555555555555555555555555555555555555555555555555",
+  "state": "recording",
+  "openedAt": "2026-09-07T05:00:00Z",
+  "closedAt": null,
+  "transitions": [
+    {"sequence": 1, "state": "pending", "at": "2026-09-07T05:00:00Z", "reasonCode": null},
+    {"sequence": 2, "state": "recording", "at": "2026-09-07T05:00:00.100Z", "reasonCode": null}
+  ],
+  "capture": {
+    "profile": {"container": "wav", "video": null, "audio": {"codec": "pcm_s16le", "sampleRateHz": 8000, "channels": 1}, "timeBase": "milliseconds"},
+    "elapsedDurationMs": 100,
+    "capturedDurationMs": 100,
+    "droppedFrames": 0,
+    "sourceTimeline": [
+      {"sequence": 1, "startedOffsetMs": 0, "mode": "live"}
+    ],
+    "segments": [
+      {"kind": "segment", "sequence": 1, "storageKey": "artifacts/segment-000001.wav", "startedOffsetMs": 0, "durationMs": 100, "byteLength": 1644, "sha256": "dbf4734838892d8ac9e35fb8203e39c27e4db3f8c1403d811010ce0a68b18b2f"}
+    ],
+    "finalArtifact": null
+  },
+  "destinations": [
+    {"slot": 1, "finalStatus": "pending", "attempts": [
+      {"sequence": 1, "startedAt": "2026-09-07T05:00:00.100Z", "endedAt": null, "status": "in_progress", "observedBytes": 800, "errorCode": null}
+    ]}
+  ],
+  "errors": [],
+  "retention": {"classification": "public-broadcast", "deleteAfter": "2026-10-07T05:00:00Z", "legalHold": false}
+}
