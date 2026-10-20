@@ -15,11 +15,11 @@ PROGRAM_ID=croccante-smoke-program
 TEST_CONTROL_TOKEN=croccante-smoke-control-token
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
-CONTROL_SECRET_FILE=$(mktemp)
+CONTROL_SECRET_FILE=$(mktemp "${TMPDIR:-/tmp}/croccante-control.XXXXXX")
 printf '%s\n' "$TEST_CONTROL_TOKEN" > "$CONTROL_SECRET_FILE"
 # A stream key shaped like a real one, so we can assert it never reaches a log.
 FAKE_KEY="abcd-efgh-ijkl-mnop-qrst"
-FAKE_SECRETS_FILE=$(mktemp)
+FAKE_SECRETS_FILE=$(mktemp "${TMPDIR:-/tmp}/croccante-destinations.XXXXXX")
 cat > "$FAKE_SECRETS_FILE" <<EOF
 {
   "sink-a": {"version-a": {"scheme": "rtmp", "host": "sink-a", "port": 1935, "application": "live", "streamKey": "$FAKE_KEY"}},
