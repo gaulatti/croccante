@@ -115,7 +115,12 @@ second validates the versioned recording schema, synthetic media fixtures,
 lifecycle invariants, checksums, and bounded redacted reports. The
 smoke harness brings up local RTMP and RTMPS sinks, runs the relay, and asserts
 on actual relayed bytes plus authenticated lifecycle and metrics behavior.
-Needs Docker.
+Needs Docker. On macOS with Colima, set `TMPDIR` to an existing directory
+shared with that VM (for example a private directory under your home folder);
+the harness honors it for its temporary fake-secret bind mounts. macOS
+`mktemp` without a template can otherwise select an unshared `/var/folders`
+path, which Docker mounts as a directory rather than the expected secret file.
+The harness removes its fake-secret files and disposable containers on exit.
 Touches no real platform account and no real stream key. Also runs in CI on
 every push.
 
