@@ -55,7 +55,8 @@ class ResolvedSelection:
 
 
 class SecretProvider(Protocol):
-    def get(self, secret_id: str, version_id: str) -> Mapping[str, object]: ...
+    def get(self, secret_id: str, version_id: str) -> Mapping[str, object]:
+        """Return the exact secret version as a JSON object or raise DestinationError."""
 
 
 def canonical_json(value: object) -> str:
@@ -154,7 +155,7 @@ class AWSSecretsManagerProvider:
     def __init__(self) -> None:
         try:
             import boto3
-        except ImportError as exc:  # pragma: no cover - image packaging guard
+        except ImportError as exc:
             raise DestinationError("provider_unavailable") from exc
         self.client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION"))
 
