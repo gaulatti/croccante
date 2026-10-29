@@ -379,3 +379,29 @@ end-to-end contract.
 <!-- END AGENTIC-CODING MANAGED RULES -->
 
 <!-- Repository-specific instructions below are maintained locally. -->
+
+## Required Clouseau review before creating a PR
+
+- Before creating any pull request, run the current shared `clouseau` skill
+  locally with your authenticated coding harness against the complete change.
+- Fix the reported defects and required changes, run the local verification
+  recipe (`.clouseau-local.json`: the unit suite under coverage), and rerun
+  Clouseau after repairs. Resolve every actionable finding; do not create a PR
+  with unresolved findings or an incomplete review.
+- Review the final committed change with a clean worktree. A change to the code,
+  base or protected review policy requires a matching fresh review. Preserve
+  negative review records; never repeat an unchanged review to obtain a pass.
+- Publish the passing signed receipt and include its returned marker in the
+  initial body of a ready, non-draft PR. Agent-created PRs must not omit local
+  review to move paid AI work into CI. Follow Clouseau's bounded repair policy;
+  if the review cannot pass, report the blocker before creating the PR.
+- CI independently verifies the receipt, tests and exact 100% line/branch
+  coverage. Local review never waives those checks. Changes without an agent's
+  signed review, including manual and dependency-bot changes, use CI AI review.
+- Every Python source file needs real tests at 100% line and branch coverage
+  with no `# pragma` coverage directives and no `.coveragerc` exclusions.
+- A merge to `main` of a file that ships in the image (`deployment.paths` in
+  `.github/clouseau.json`) requests a production deployment that interrupts the
+  live broadcast. Those paths are protected review controls: they need the
+  owner's `/approve-intent` confirmation and are never merged without it.
+- Submit changes through protected PRs; never push directly to `main`.

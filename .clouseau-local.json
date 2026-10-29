@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "base_branch": "main",
+  "readme": "README.md",
+  "repository_policy": ".github/clouseau.md",
+  "verification": [
+    ["python3", "-m", "coverage", "run", "-m", "unittest", "discover", "-s", "test", "-p", "test_*.py"],
+    ["python3", "-m", "coverage", "json", "-o", "coverage.json"]
+  ],
+  "coverage": {
+    "format": "coveragepy",
+    "report": "coverage.json",
+    "source_directory": "."
+  }
+}

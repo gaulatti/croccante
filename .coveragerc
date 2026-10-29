@@ -1,0 +1,9 @@
+[run]
+branch = True
+source = .
+omit = test/*
+
+[report]
+# No exclusion patterns: every application line and branch must be executed.
+exclude_lines =
+exclude_also =

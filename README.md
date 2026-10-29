@@ -119,6 +119,23 @@ Needs Docker.
 Touches no real platform account and no real stream key. Also runs in CI on
 every push.
 
+## Pull request verification
+
+Local agent review uses the shared `clouseau` skill and `.clouseau-local.json`;
+it needs no CI provider keys. Every PR runs the unit suite with **exactly 100%
+line and branch coverage** over all application Python (measured by
+coverage.py with branch measurement and no exclusion patterns or pragmas, then
+validated by Clouseau's complete source inventory), the Clouseau and workflow
+security tests, and the real relay smoke harness. After those pass, Clouseau
+reviews the change against [.github/clouseau.md](.github/clouseau.md), approves
+and arms auto-merge. See [docs/automatic-ci-upgrades.md](docs/automatic-ci-upgrades.md).
+
+Merging and deploying are separate. `deploy.yml` runs on `main` pushes only when
+a file that ships in the image changes (see `deployment.paths` in
+`.github/clouseau.json`); Clouseau merges use a token that does not start push
+workflows, so it dispatches the deployment explicitly in that case. Deploying
+replaces the live relay and interrupts a broadcast for a few seconds.
+
 ## File map
 
 ```
