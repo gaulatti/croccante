@@ -36,6 +36,12 @@ with its own short-lived token and logs out again when the step ends.
 ssh-keyscan -t ed25519 <server-ip>
 ```
 
+The deploy job also reads two repository **variables**, `PROGRAM_ID` and
+`AWS_REGION`, and fails before touching the running container if either is
+empty. All four secrets and both variables must exist before the first deploy.
+A run that reports `missing server host` stopped before any host operation:
+the configuration is absent, nothing on the server changed.
+
 There is deliberately **no `GHCR_PAT`**. The deploy authenticates to GHCR using
 the workflow run's own `GITHUB_TOKEN`, so no long-lived registry credential is
 ever written to the server.
@@ -68,6 +74,52 @@ The deploy fails if the new container does not reach `healthy`.
 > **Open item:** the interruption window has not yet been measured against the
 > real server, because croccante has never been deployed. Record the figure from
 > the first real deploy here.
+
+### Release evidence and rollback
+
+A source merge, a green CI run, a deploy run and an accepted live relay are
+four separate facts. Record each separately for every release.
+
+Evidence to retain per release (never copy stream URLs, keys, tokens or
+credentials into it):
+
+1. Deployed `main` SHA, and the `Build & push` job result for that exact SHA.
+2. Immutable image digest. `RepoDigests` exists on image objects, not on the
+   container, so inspect the image the container runs:
+   `docker inspect -f '{{.Image}}' croccante` prints the running image ID, and
+   `docker image inspect --format '{{.Id}} {{index .RepoDigests 0}}' ghcr.io/<owner>/croccante:<SHA>`
+   prints the same ID with the registry digest. Confirm the two IDs match.
+3. The `Stream interruption window` notice from the run.
+4. `docker inspect -f '{{.State.Health.Status}}' croccante` is `healthy`, again
+   after `docker restart croccante`.
+5. Redaction: `docker logs croccante` and `docker inspect --format
+   '{{json .Config.Cmd}} {{json .Config.Env}}' croccante` contain no stream key
+   or full destination URL. Env values for `AWS_SHARED_CREDENTIALS_FILE` and
+   other file paths are expected; credential contents are not.
+6. Media continuity, which only a real authorized publisher and destination can
+   prove: nginx `/stat` incoming bytes and each destination's
+   `croccante_relay_slot_state` and outbound progress advancing through the
+   publisher hook. The smoke harness proves the mechanics, not this.
+
+Before a deploy, note the previous image so it can be restored:
+`docker inspect --format '{{.Config.Image}}' croccante` (tags are commit SHAs).
+
+Rollback restores that previous SHA without rebuilding anything. Every image
+tag is immutable per commit, so on the host:
+
+```bash
+docker pull ghcr.io/<owner>/croccante:<previous-sha>
+docker stop croccante && docker rm croccante
+# re-run the exact `docker run` from .github/workflows/deploy.yml with the
+# previous image reference, then wait for the container to report healthy
+```
+
+Expect an interruption comparable to a normal deploy (the stop/rm/run swap);
+measure and record it. Rolling back is an operator action on the host and is
+not automated by the workflow.
+
+Source evidence cannot stand in for the host evidence above: items 2 to 6 need
+a deploy to have actually run against the production host.
 
 ## Destination secrets and IAM
 
