@@ -30,15 +30,10 @@ with its own short-lived token and logs out again when the step ends.
 | `SERVER_HOST`            | Server IP or hostname                       |
 | `SERVER_USER`            | SSH user                                    |
 | `SERVER_SSH_KEY`         | Private SSH key (no passphrase)             |
-| `SERVER_SSH_FINGERPRINT` | Server host key fingerprint                 |
-
-```bash
-ssh-keyscan -t ed25519 <server-ip>
-```
 
 The deploy job also reads two repository **variables**, `PROGRAM_ID` and
 `AWS_REGION`, and fails before touching the running container if either is
-empty. All four secrets and both variables must exist before the first deploy.
+empty. All three secrets and both variables must exist before the first deploy.
 A run that reports `missing server host` stopped before any host operation:
 the configuration is absent, nothing on the server changed.
 
