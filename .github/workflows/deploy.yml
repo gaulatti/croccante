@@ -3,6 +3,26 @@ name: Build → GHCR → Deploy
 on:
   push:
     branches: [main]
+    # Only changes to files that ship in the image deploy. Tests, docs, review
+    # policy and edits to this workflow never replace the live relay on their
+    # own. Clouseau merges use a token that does not start push workflows, so
+    # it dispatches this workflow explicitly when a merged PR touches one of
+    # these paths.
+    paths:
+      - 'Dockerfile'
+      - 'nginx.conf'
+      - 'entrypoint.sh'
+      - 'healthcheck.sh'
+      - 'relay-lib.sh'
+      - 'relay-dest.sh'
+      - 'relay-start.sh'
+      - 'relay-stop.sh'
+      - 'control-server.py'
+      - 'destination_runtime.py'
+      - 'destination_store.py'
+      - 'destination_url_shim.c'
+      - 'filler_store.py'
+      - 'relay_metrics.py'
   # Run the smoke harness on PRs too. Build and deploy stay off — see the
   # guards on those jobs.
   pull_request:
@@ -75,6 +95,11 @@ jobs:
     # Configure this environment in repo settings to gate deploys behind a
     # manual approval. Deploying interrupts a live broadcast for a few seconds.
     environment: production
+    # One production swap at a time. Only this job is serialized, so PR smoke
+    # runs can never queue behind or displace a deployment.
+    concurrency:
+      group: croccante-production
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: read
