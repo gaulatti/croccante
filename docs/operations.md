@@ -84,9 +84,11 @@ Evidence to retain per release (never copy stream URLs, keys, tokens or
 credentials into it):
 
 1. Deployed `main` SHA, and the `Build & push` job result for that exact SHA.
-2. Immutable image digest. On the host, after the deploy:
-   `docker inspect --format '{{.Image}} {{index .RepoDigests 0}}' croccante`
-   and confirm the digest is the one for `ghcr.io/<owner>/croccante:<SHA>`.
+2. Immutable image digest. `RepoDigests` exists on image objects, not on the
+   container, so inspect the image the container runs:
+   `docker inspect -f '{{.Image}}' croccante` prints the running image ID, and
+   `docker image inspect --format '{{.Id}} {{index .RepoDigests 0}}' ghcr.io/<owner>/croccante:<SHA>`
+   prints the same ID with the registry digest. Confirm the two IDs match.
 3. The `Stream interruption window` notice from the run.
 4. `docker inspect -f '{{.State.Health.Status}}' croccante` is `healthy`, again
    after `docker restart croccante`.
