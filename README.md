@@ -104,20 +104,25 @@ docker run --rm -p 1935:1935 \
 ## Tests
 
 ```bash
-python3 test/test_filler_store.py -v
-python3 test/test_recording_manifest.py -v
+python3 -m pip install coverage==7.17.0
+python3 -m coverage run --branch --source=. --omit='test/*' -m unittest discover -s test -p 'test_*.py'
+python3 -m coverage report -m
 ./test/smoke.sh
 ```
 
-The first command performs real local ffmpeg/ffprobe preparation for image,
-silent video, and WebM-with-audio sources plus API/state recovery tests. The
-second validates the versioned recording schema, synthetic media fixtures,
-lifecycle invariants, checksums, and bounded redacted reports. The
-smoke harness brings up local RTMP and RTMPS sinks, runs the relay, and asserts
-on actual relayed bytes plus authenticated lifecycle and metrics behavior.
-Needs Docker.
-Touches no real platform account and no real stream key. Also runs in CI on
-every push.
+The unit suite needs `ffmpeg`/`ffprobe` and Python 3.12 or newer. It runs every
+Python module in this repository: real local ffmpeg preparation for image,
+silent video and WebM-with-audio fillers; the authenticated lifecycle, filler
+and destination routes and the Start/Stop state machine of `control-server.py`
+served over real HTTP in-process (supervisors are tiny shell scripts, secrets
+come from the explicit non-production file provider, and subprocess, signal,
+clock and filesystem faults are injected, so no Docker, nginx-rtmp or ffmpeg
+relay is needed); destination parsing, AWS and file secret providers; the
+metrics collector's `/proc` sources; and the recording manifest rejection matrix,
+artifact verification and bounded redacted reports. The smoke harness brings up
+local RTMP and RTMPS sinks, runs the relay, and asserts on actual relayed bytes
+plus authenticated lifecycle and metrics behavior. It needs Docker, touches no
+real platform account and no real stream key, and also runs in CI on every push.
 
 ## File map
 

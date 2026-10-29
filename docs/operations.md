@@ -281,7 +281,8 @@ resolved hosts, URLs, secret references, or keys.
 ## Verification before shipping a change
 
 ```bash
-python3 test/test_filler_store.py -v
+python3 -m coverage run --branch --source=. --omit='test/*' -m unittest discover -s test -p 'test_*.py'
+python3 -m coverage report -m   # must show 100% line and branch coverage
 ./test/smoke.sh
 ```
 
