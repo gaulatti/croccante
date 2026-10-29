@@ -3,7 +3,9 @@
 import json
 import os
 import sys
+import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +20,7 @@ from destination_store import (
     provider_from_environment,
     resolve_selection,
 )
+import destination_runtime
 from destination_runtime import DestinationRuntime
 
 
@@ -134,8 +137,28 @@ class DestinationStoreTest(unittest.TestCase):
                 ("one", "v1"): {"scheme": "rtmp", "host": "one.example", "application": "live", "streamKey": "one"},
                 ("two", "v1"): {"scheme": "rtmp", "host": "two.example", "application": "live", "streamKey": "two"},
             })
-            with self.assertRaisesRegex(DestinationError, "supervisor_start_failed"):
-                runtime.activate(resolve_selection(parsed, provider))
+            # The runtime's fixed fail-fast window is shorter than a loaded CI
+            # runner needs to schedule both shells, so the losing supervisor
+            # may not have run mkdir yet. Make the window deterministic by
+            # waiting (bounded) until one supervisor has really exited.
+            spawned: list[subprocess.Popen[bytes]] = []
+            real_popen = subprocess.Popen
+            real_sleep = time.sleep
+
+            def recording_popen(*args, **kwargs):
+                process = real_popen(*args, **kwargs)
+                spawned.append(process)
+                return process
+
+            def wait_for_loser(_seconds: float) -> None:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline and all(p.poll() is None for p in spawned):
+                    real_sleep(0.01)
+
+            with patch.object(destination_runtime.subprocess, "Popen", recording_popen), \
+                    patch.object(destination_runtime.time, "sleep", wait_for_loser):
+                with self.assertRaisesRegex(DestinationError, "supervisor_start_failed"):
+                    runtime.activate(resolve_selection(parsed, provider))
             self.assertIsNone(runtime.active)
             self.assertEqual(runtime.processes, [])
             self.assertEqual((root / "dest.count").read_text().strip(), "0")
