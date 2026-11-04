@@ -124,6 +124,13 @@ local RTMP and RTMPS sinks, runs the relay, and asserts on actual relayed bytes
 plus authenticated lifecycle and metrics behavior. It needs Docker, touches no
 real platform account and no real stream key, and also runs in CI on every push.
 
+On macOS with Colima, set `TMPDIR` to an existing directory shared with that
+VM (for example a private directory under your home folder); the smoke harness
+honors it for its temporary fake-secret bind mounts. macOS `mktemp` without a
+template can otherwise select an unshared `/var/folders` path, which Docker
+mounts as a directory rather than the expected secret file. The harness removes
+its fake-secret files and disposable containers on exit.
+
 ## Pull request verification
 
 Local agent review uses the shared `clouseau` skill and `.clouseau-local.json`;
