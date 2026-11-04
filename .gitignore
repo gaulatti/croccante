@@ -12,3 +12,10 @@ test/.out/
 
 # Wiki checkout (managed separately, see AGENTS.md)
 /wiki/
+
+# Coverage output
+.coverage
+coverage.json
+__pycache__/
+.clouseau-ci/
+node_modules/

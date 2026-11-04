@@ -104,25 +104,49 @@ docker run --rm -p 1935:1935 \
 ## Tests
 
 ```bash
-python3 test/test_filler_store.py -v
-python3 test/test_recording_manifest.py -v
+python3 -m pip install coverage==7.17.0
+python3 -m coverage run --branch --source=. --omit='test/*' -m unittest discover -s test -p 'test_*.py'
+python3 -m coverage report -m
 ./test/smoke.sh
 ```
 
-The first command performs real local ffmpeg/ffprobe preparation for image,
-silent video, and WebM-with-audio sources plus API/state recovery tests. The
-second validates the versioned recording schema, synthetic media fixtures,
-lifecycle invariants, checksums, and bounded redacted reports. The
-smoke harness brings up local RTMP and RTMPS sinks, runs the relay, and asserts
-on actual relayed bytes plus authenticated lifecycle and metrics behavior.
-Needs Docker. On macOS with Colima, set `TMPDIR` to an existing directory
-shared with that VM (for example a private directory under your home folder);
-the harness honors it for its temporary fake-secret bind mounts. macOS
-`mktemp` without a template can otherwise select an unshared `/var/folders`
-path, which Docker mounts as a directory rather than the expected secret file.
-The harness removes its fake-secret files and disposable containers on exit.
-Touches no real platform account and no real stream key. Also runs in CI on
-every push.
+The unit suite needs `ffmpeg`/`ffprobe` and Python 3.12 or newer. It runs every
+Python module in this repository: real local ffmpeg preparation for image,
+silent video and WebM-with-audio fillers; the authenticated lifecycle, filler
+and destination routes and the Start/Stop state machine of `control-server.py`
+served over real HTTP in-process (supervisors are tiny shell scripts, secrets
+come from the explicit non-production file provider, and subprocess, signal,
+clock and filesystem faults are injected, so no Docker, nginx-rtmp or ffmpeg
+relay is needed); destination parsing, AWS and file secret providers; the
+metrics collector's `/proc` sources; and the recording manifest rejection matrix,
+artifact verification and bounded redacted reports. The smoke harness brings up
+local RTMP and RTMPS sinks, runs the relay, and asserts on actual relayed bytes
+plus authenticated lifecycle and metrics behavior. It needs Docker, touches no
+real platform account and no real stream key, and also runs in CI on every push.
+
+On macOS with Colima, set `TMPDIR` to an existing directory shared with that
+VM (for example a private directory under your home folder); the smoke harness
+honors it for its temporary fake-secret bind mounts. macOS `mktemp` without a
+template can otherwise select an unshared `/var/folders` path, which Docker
+mounts as a directory rather than the expected secret file. The harness removes
+its fake-secret files and disposable containers on exit.
+
+## Pull request verification
+
+Local agent review uses the shared `clouseau` skill and `.clouseau-local.json`;
+it needs no CI provider keys. Every PR runs the unit suite with **exactly 100%
+line and branch coverage** over all application Python (measured by
+coverage.py with branch measurement and no exclusion patterns or pragmas, then
+validated by Clouseau's complete source inventory), the Clouseau and workflow
+security tests, and the real relay smoke harness. After those pass, Clouseau
+reviews the change against [.github/clouseau.md](.github/clouseau.md), approves
+and arms auto-merge. See [docs/automatic-ci-upgrades.md](docs/automatic-ci-upgrades.md).
+
+Merging and deploying are separate. `deploy.yml` runs on `main` pushes only when
+a file that ships in the image changes (see `deployment.paths` in
+`.github/clouseau.json`); Clouseau merges use a token that does not start push
+workflows, so it dispatches the deployment explicitly in that case. Deploying
+replaces the live relay and interrupts a broadcast for a few seconds.
 
 ## File map
 
