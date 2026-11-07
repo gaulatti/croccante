@@ -182,13 +182,16 @@ as-aired artifact; it never reads, writes, or replaces Alana's clean program
 master.
 
 - **Capture leg.** `build_capture_command` is `ffmpeg -c copy` into numbered
-  MPEG-TS segments under `<root>/<sessionId>/artifacts/`. The source must be a
-  local path or a loopback `rtmp://` URL, never a destination. A segment is
+  MPEG-TS segments under `<root>/<sessionId>/artifacts/`. The source must be an absolute local path or a credential-free `rtmp://`
+  URL whose host is exactly `127.0.0.1`, `localhost` or `::1`, never a destination. A segment is
   registered only after the next segment exists (or the process ended), so a
   half-written segment is never verified.
 - **Verification.** Each registered segment gets a SHA-256, byte length and an
   ffprobe duration, and its video/audio codecs must equal the declared profile.
-  A mismatch discards the segment and closes the session `partial`. Finalization
+  A mismatch discards the segment and closes the session `partial`. A segment
+  that cannot be probed is discarded as a visible `unobserved` gap (the session
+  can then only end `partial`) and later segments are renamed so artifact keys
+  stay contiguous. Finalization
   concatenates the verified segments to `artifacts/final.ts`, re-hashes it, and
   compares its size to the sum of the segments.
 - **Transitions and delivery.** `note_source("live"|"filler")` records relay and
@@ -202,6 +205,11 @@ master.
   segments, a failed final artifact, a quota stop, a codec change, or a failed or
   unattempted destination ends `partial`, never `complete`. Failed sessions never
   carry a final artifact.
+- **Evidence bounds.** The v1 caps (64 errors, transitions and source events,
+  32 attempts per slot) are never exceeded: when a session approaches one it
+  stops recording history and closes `partial` with `capture_interrupted`, so a
+  long broadcast with a flapping destination or publisher still ends with a
+  valid terminal manifest and report.
 - **Failure isolation.** `AsAiredCapture` never raises: every relay callback is
   guarded, failures are counted (`snapshot()["recorder_failures"]`), a close that
   cannot finalize writes a `failed` manifest, and an invalid manifest is never

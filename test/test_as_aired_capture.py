@@ -114,11 +114,15 @@ class SettingsTests(Base):
     def test_valid_settings_and_every_rejection(self) -> None:
         self.assertEqual(self.settings.segment_seconds, 10)
         self.assertIsNotNone(CaptureSettings.from_mapping(raw(source="/run/relay/program.ts", legalHold=True), root=self.root))
+        for source in ("rtmp://localhost/live/x", "rtmp://[::1]/live/x"):
+            self.assertIsNotNone(CaptureSettings.from_mapping(raw(source=source), root=self.root))
         bad = [
             {"unknown": 1}, {"segmentSeconds": 1}, {"segmentSeconds": True}, {"segmentSeconds": "10"},
             {"maxSessionBytes": 0}, {"retentionDays": 366}, {"source": "rtmps://example.invalid/x"},
             {"source": 5}, {"classification": "secret"}, {"classification": None}, {"legalHold": "yes"}, {"video": None, "audio": None}, {"video": "h264"},
             {"maxSessionBytes": 30_000},
+            {"source": "rtmp://127.0.0.1.evil.example/live"}, {"source": "rtmp://user:pw@127.0.0.1/x"},
+            {"source": "rtmp://localhost@evil.example/x"}, {"source": "/tmp/a://b"}, {"source": "http://127.0.0.1/x"},
         ]
         for override in bad:
             with self.subTest(override=override), self.assertRaises(CaptureConfigError):
@@ -346,6 +350,12 @@ class SessionTests(Base):
             session.note_source("unobserved")
         self.assertEqual(session.state, "recording")
 
+    def test_saturating_twice_records_one_error(self) -> None:
+        session = AsAiredSession(self.settings, destination_count=1, configuration_hash=HASH, clock=self.clock)
+        session.saturate()
+        session.saturate()
+        self.assertEqual([e["code"] for e in session.manifest()["errors"]], ["capture_interrupted"])
+
     def test_final_artifact_verification_failure_is_reported_as_partial(self) -> None:
         cap = self.facade(destination_count=1)
         cap.destination_started(1)
@@ -388,20 +398,88 @@ class IsolationTests(Base):
         cap.note_source("live"), cap.destination_started(1), cap.destination_ended(1, "failed", 0, "x"), cap.poll(), cap.recover(), cap.close()
         self.assertEqual(cap.snapshot(), {"state": "unavailable", "segments": 0, "bytes": 0, "recorder_failures": 1})
 
-    def test_probe_report_and_close_failures_do_not_reach_the_relay(self) -> None:
-        def broken_probe(_path):
-            raise subprocess.CalledProcessError(1, "ffprobe")
+    def test_unprobeable_segment_becomes_a_visible_gap_and_numbering_stays_contiguous(self) -> None:
+        def flaky(path):
+            if path.name == "segment-000002.ts":
+                raise subprocess.CalledProcessError(1, "ffprobe")
+            return probe(path)
 
-        cap = self.facade(probe=broken_probe)
-        self.segment(cap.session.directory, 1)
-        self.processes[0].alive = False
+        cap = self.facade(probe=flaky, destination_count=1)
+        for number in (1, 2, 3, 4):
+            self.segment(cap.session.directory, number)
         cap.poll()
-        self.assertEqual(cap.failures, 1)
-        cap.close()  # probe fails again while finalizing -> failed manifest, no exception
-        manifest = self.manifest(cap)
-        self.assertEqual(manifest["state"], "failed")
+        self.assertEqual(cap.failures, 0)
+        cap.close()
+        manifest = load_manifest(cap.session.directory / "manifest.json", artifact_root=cap.session.directory)
+        self.assertEqual(manifest["state"], "partial")
+        self.assertEqual([s["storageKey"] for s in manifest["capture"]["segments"]], ["artifacts/segment-000001.ts", "artifacts/segment-000002.ts", "artifacts/segment-000003.ts"])
+        self.assertEqual([s["startedOffsetMs"] for s in manifest["capture"]["segments"]], [0, 20_000, 30_000])
+        self.assertIn("unobserved", [e["mode"] for e in manifest["capture"]["sourceTimeline"]])
         self.assertIsNone(manifest["capture"]["finalArtifact"])
-        self.assertGreaterEqual(cap.failures, 2)
+
+    def test_close_falls_back_to_a_failed_manifest_and_never_raises(self) -> None:
+        cap = self.facade()
+        self.segment(cap.session.directory, 1)
+        with mock.patch.object(capture.AsAiredSession, "finalize", side_effect=RuntimeError("boom")):
+            cap.close()
+        self.assertEqual(self.manifest(cap)["state"], "failed")
+        self.assertEqual(cap.failures, 1)
+        other = self.facade(session_id="55555555-5555-4555-8555-555555555555")
+        with mock.patch.object(capture.AsAiredSession, "persist", side_effect=OSError("disk")):
+            other.close()
+        self.assertEqual(other.failures, 2)
+
+    def test_retention_failure_does_not_prevent_capture(self) -> None:
+        with mock.patch.object(capture, "apply_retention", side_effect=OSError("busy")):
+            cap = self.facade()
+        self.assertEqual(cap.failures, 1)
+        self.assertEqual(cap.session.state, "recording")
+
+    def test_evidence_bounds_close_the_session_validly_instead_of_freezing_it(self) -> None:
+        cap = self.facade(destination_count=2)
+        for _ in range(40):
+            self.clock.advance(seconds=1)
+            cap.destination_started(1)
+            cap.destination_ended(1, "failed", 0, "destination_unavailable")
+        manifest = load_manifest(cap.session.directory / "manifest.json")
+        self.assertEqual(manifest["state"], "partial")
+        self.assertEqual(manifest["transitions"][-1]["reasonCode"], "capture_interrupted")
+        self.assertEqual(cap.failures, 0)
+        self.assertLessEqual(len(manifest["errors"]), 64)
+        cap.destination_started(1)  # a closed session ignores later relay callbacks
+
+    def test_crash_loops_and_source_flapping_also_stay_within_contract_bounds(self) -> None:
+        cap = self.facade(destination_count=1)
+        for number in range(1, 40):
+            self.segment(cap.session.directory, number)
+            self.processes[-1].alive = False
+            cap.poll()
+            self.clock.advance(seconds=1)
+            cap.recover()
+            if cap.session.terminal:
+                break
+        self.assertTrue(cap.session.terminal)
+        self.assertEqual(self.manifest(cap)["state"], "partial")
+        self.assertEqual(cap.failures, 0)
+
+        flapping = self.facade(session_id="66666666-6666-4666-8666-666666666666")
+        for index in range(100):
+            if flapping.session.terminal:
+                break
+            self.clock.advance(seconds=1)
+            flapping.note_source("filler" if index % 2 else "live")
+        self.assertEqual(self.manifest(flapping)["state"], "partial")
+        self.assertEqual(flapping.failures, 0)
+
+        gappy = self.facade(session_id="77777777-7777-4777-8777-777777777777", probe=lambda _p: {"durationMs": 1_000, "video": VIDEO, "audio": AUDIO})
+        number = 0
+        while not gappy.session.terminal and number < 200:
+            number += 1
+            self.segment(gappy.session.directory, number)
+            gappy.poll()
+            gappy.note_source("filler" if number % 2 else "live")
+        self.assertTrue(gappy.session.terminal)
+        self.assertEqual(gappy.failures, 0)
 
     def test_relay_calls_with_bad_arguments_are_isolated(self) -> None:
         cap = self.facade()

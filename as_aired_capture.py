@@ -25,12 +25,17 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import urlsplit
 
 from recording_manifest import (
     CLASSIFICATIONS,
     CONTRACT_VERSION,
+    MAX_ATTEMPTS,
     MAX_DESTINATIONS,
+    MAX_ERRORS,
     MAX_SEGMENTS,
+    MAX_SOURCE_EVENTS,
+    MAX_TRANSITIONS,
     SOURCE_MODES,
     load_manifest,
     render_session_report,
@@ -44,6 +49,9 @@ MAX_QUOTA_BYTES = 1_099_511_627_776
 CONTAINER = "mpegts"
 EXTENSION = "ts"
 _TERMINAL = frozenset({"complete", "partial", "failed"})
+_LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
+# Evidence headroom kept free so a saturated session can still close validly.
+_RESERVE = 4
 
 
 class CaptureConfigError(ValueError):
@@ -85,7 +93,7 @@ class CaptureSettings:
             return value
 
         source = raw.get("source")
-        if not isinstance(source, str) or not source.startswith(("rtmp://127.0.0.1", "rtmp://localhost", "/")):
+        if not isinstance(source, str) or not _local_source(source):
             raise CaptureConfigError("invalid_source")
         classification = raw.get("classification")
         if not isinstance(classification, str) or classification not in CLASSIFICATIONS:
@@ -111,6 +119,15 @@ class CaptureSettings:
         if settings.max_session_bytes > settings.max_total_bytes:
             raise CaptureConfigError("invalid_maxSessionBytes")
         return settings
+
+
+def _local_source(source: str) -> bool:
+    """An absolute local path, or a credential-free loopback rtmp:// URL."""
+
+    if source.startswith("/"):
+        return "://" not in source
+    parts = urlsplit(source)
+    return parts.scheme == "rtmp" and parts.hostname in _LOOPBACK and parts.username is None and parts.password is None
 
 
 def build_capture_command(settings: CaptureSettings, session_dir: Path, start_number: int) -> list[str]:
@@ -246,6 +263,7 @@ class AsAiredSession:
         self._gap_ms = 0
         self._interruptions = 0
         self.truncated: str | None = None
+        self._cursor = 1
         (self.directory / "artifacts").mkdir(parents=True)
         self.persist()
 
@@ -270,6 +288,35 @@ class AsAiredSession:
     @property
     def terminal(self) -> bool:
         return self._state in _TERMINAL
+
+    @property
+    def segment_count(self) -> int:
+        return len(self._segments)
+
+    @property
+    def next_file_number(self) -> int:
+        """Number of the next capture file to read (ffmpeg numbering, which can skip)."""
+
+        return self._cursor
+
+    @property
+    def saturated(self) -> bool:
+        """True when contract evidence bounds leave no room for more history."""
+
+        return (
+            len(self._errors) >= MAX_ERRORS - _RESERVE
+            or len(self._transitions) >= MAX_TRANSITIONS - _RESERVE
+            or any(len(attempts) >= MAX_ATTEMPTS - 1 for attempts in self._destinations)
+            or len(self._noted) >= MAX_SOURCE_EVENTS - _RESERVE
+            or len(derive_source_timeline(self._noted, self._segments, max(self._offset_ms(), self._next_offset))) >= MAX_SOURCE_EVENTS - _RESERVE
+        )
+
+    def saturate(self) -> None:
+        """Stop recording more history: the rest of the broadcast is unobserved."""
+
+        self.truncated = self.truncated or "capture_interrupted"
+        if not any(error["code"] == "capture_interrupted" for error in self._errors):
+            self.record_error("capture", "capture_interrupted", False)
 
     @property
     def total_bytes(self) -> int:
@@ -301,33 +348,48 @@ class AsAiredSession:
 
     def end_destination_attempt(self, slot: int, status: str, observed_bytes: int, error_code: str | None) -> None:
         attempt = self._destinations[slot - 1][-1]
-        attempt.update(endedAt=_iso(self._now()), status=status, observedBytes=observed_bytes, errorCode=error_code)
-        if status != "accepted":
-            self.record_error("delivery", error_code or "destination_unavailable", status == "failed")
+        code = None if status == "accepted" else error_code or "destination_unavailable"
+        attempt.update(endedAt=_iso(self._now()), status=status, observedBytes=observed_bytes, errorCode=code)
+        if code is not None:
+            self.record_error("delivery", code, status == "failed")
 
     def add_segment(self, path: Path, probe: Callable[[Path], dict[str, Any]]) -> bool:
-        """Verify and register a finished segment.
+        """Consume one finished capture file.
 
-        Returns False, and discards the segment, when the per-session quota is
-        reached or the measured codecs differ from the declared profile.
+        Returns True when the file was handled and capture may continue: either
+        registered, or (when it cannot be probed) discarded as a visible gap.
+        Returns False, after discarding the file, when the per-session quota is
+        reached or the measured codecs differ from the declared profile; the
+        session then stops growing and ends `partial`.
         """
 
+        self._cursor += 1
         size = path.stat().st_size
         if self.total_bytes + size > self.settings.max_session_bytes or len(self._segments) >= MAX_SEGMENTS:
             path.unlink()
             self.truncated = "disk_full"
             self.record_error("storage", "disk_full", False)
             return False
-        facts = probe(path)
+        try:
+            facts = probe(path)
+        except Exception:  # noqa: BLE001 - an unverifiable segment is a gap, not a reason to stop recording
+            path.unlink()
+            self._interruptions += 1
+            self._next_offset += self.settings.segment_seconds * 1000
+            self.record_error("capture", "capture_interrupted", True)
+            return True
         if facts["video"] != self._profile["video"] or facts["audio"] != self._profile["audio"]:
             path.unlink()
             self.truncated = "capture_interrupted"
             self.record_error("capture", "capture_interrupted", False)
             return False
         sequence = len(self._segments) + 1
+        target = path.with_name(f"segment-{sequence:06d}.{EXTENSION}")
+        if target != path:
+            os.replace(path, target)
         self._segments.append({
-            "kind": "segment", "sequence": sequence, "storageKey": f"artifacts/segment-{sequence:06d}.{EXTENSION}",
-            "startedOffsetMs": self._next_offset, "durationMs": facts["durationMs"], "byteLength": size, "sha256": _sha256(path),
+            "kind": "segment", "sequence": sequence, "storageKey": f"artifacts/{target.name}",
+            "startedOffsetMs": self._next_offset, "durationMs": facts["durationMs"], "byteLength": size, "sha256": _sha256(target),
         })
         self._next_offset += facts["durationMs"]
         return True
@@ -408,10 +470,15 @@ class AsAiredSession:
         self.persist()
 
     def _close_open_attempts(self) -> None:
+        """Unresolved attempts become `unknown`, recorded once to stay within bounds."""
+
+        closed = False
         for attempts in self._destinations:
             if attempts and attempts[-1]["status"] == "in_progress":
                 attempts[-1].update(endedAt=_iso(self._now()), status="unknown", errorCode="finalization_failed")
-                self.record_error("delivery", "finalization_failed", False)
+                closed = True
+        if closed:
+            self.record_error("delivery", "finalization_failed", False)
 
     def finalize(self) -> None:
         """Concatenate verified segments into one artifact, then close the session."""
@@ -489,7 +556,8 @@ class AsAiredCapture:
 
     def _open(self) -> None:
         count, configuration_hash, session_id = self._args
-        apply_retention(self.settings.root, self._clock(), self.settings.max_total_bytes)
+        # A retention fault must not prevent the session; the quota check below still applies.
+        self._guard(lambda: apply_retention(self.settings.root, self._clock(), self.settings.max_total_bytes))
         self.session = AsAiredSession(self.settings, destination_count=count, configuration_hash=configuration_hash, clock=self._clock, session_id=session_id)
         if usage(self.settings.root) > self.settings.max_total_bytes:
             self.session.fail("disk_full", "storage")
@@ -500,7 +568,7 @@ class AsAiredCapture:
 
     def _launch(self) -> None:
         assert self.session is not None
-        command = build_capture_command(self.settings, self.session.directory, len(self.session._segments) + 1)
+        command = build_capture_command(self.settings, self.session.directory, self.session.next_file_number)
         self._process = self._start(command)
 
     def _alive(self) -> bool:
@@ -509,32 +577,35 @@ class AsAiredCapture:
     def _active(self) -> bool:
         return self.session is not None and not self.session.terminal
 
+    def _record(self, action: Callable[[], None]) -> None:
+        """Run a guarded mutation, then close the session if evidence bounds are reached."""
+
+        if self._active() and self._guard(action) and self.session.saturated:
+            self.session.saturate()
+            self.close()
+
     def note_source(self, mode: str) -> None:
         """Called on every relay <-> filler transition."""
 
-        if self._active():
-            self._guard(lambda: self.session.note_source(mode))
+        self._record(lambda: self.session.note_source(mode))
 
     def destination_started(self, slot: int) -> None:
-        if self._active():
-            self._guard(lambda: self.session.begin_destination_attempt(slot))
+        self._record(lambda: self.session.begin_destination_attempt(slot))
 
     def destination_ended(self, slot: int, status: str, observed_bytes: int, error_code: str | None) -> None:
-        if self._active():
-            self._guard(lambda: self.session.end_destination_attempt(slot, status, observed_bytes, error_code))
+        self._record(lambda: self.session.end_destination_attempt(slot, status, observed_bytes, error_code))
 
     def poll(self) -> None:
         """Register finished segments, detect a crashed recorder, publish the manifest."""
 
-        if self._active():
-            self._guard(self._poll)
+        self._record(self._poll)
 
     def _poll(self) -> None:
         session = self.session
         assert session is not None
         directory = session.directory / "artifacts"
         while True:
-            number = len(session._segments) + 1
+            number = session.next_file_number
             current = directory / f"segment-{number:06d}.{EXTENSION}"
             following = directory / f"segment-{number + 1:06d}.{EXTENSION}"
             if not current.exists() or not (following.exists() or not self._alive()):
@@ -550,11 +621,11 @@ class AsAiredCapture:
     def recover(self) -> None:
         """Restart the capture process after a crash; the outage stays a visible gap."""
 
-        if self._active() and self.session is not None and self.session.state == "interrupted":
+        if self._active() and self.session.state == "interrupted":
             def action() -> None:
                 self.session.resume("process_crashed")
                 self._launch()
-            self._guard(action)
+            self._record(action)
 
     def _stop_process(self) -> None:
         self._stopped = True
@@ -581,7 +652,7 @@ class AsAiredCapture:
         assert session is not None
         directory = session.directory / "artifacts"
         while True:
-            current = directory / f"segment-{len(session._segments) + 1:06d}.{EXTENSION}"
+            current = directory / f"segment-{session.next_file_number:06d}.{EXTENSION}"
             if not current.exists() or not session.add_segment(current, self._probe):
                 break
 
@@ -591,7 +662,7 @@ class AsAiredCapture:
         session = self.session
         return {
             "state": session.state if session else "unavailable",
-            "segments": len(session._segments) if session else 0,
+            "segments": session.segment_count if session else 0,
             "bytes": session.total_bytes if session else 0,
             "recorder_failures": self.failures,
         }
