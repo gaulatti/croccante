@@ -21,7 +21,7 @@ cannot express by itself. Producers and consumers must call
 | As-aired bytes observed at Croccante, segment order, gaps, final artifact | Croccante | Yes: slot-neutral media facts and SHA-256 checksums. |
 | Attempted delivery to configured outputs | Croccante | Yes: numbered slots, attempts, final status, and closed error codes. |
 | Platform-side playback, archive acceptance, or audience receipt | Destination/platform | No. `accepted` means the transport accepted Croccante's attempt and bytes were observed; it is not a claim about downstream playback. |
-| Artifact upload/storage wiring and retention execution | #17 runtime | No runtime is introduced here; v1 defines the evidence that implementation must write and enforce. |
+| Capture leg, segment verification, finalization, quota and retention | `as_aired_capture.py` ([#17](https://github.com/gaulatti/croccante/issues/17)) | Yes: it writes only manifests that pass `validate_manifest`. Wiring it into Start/Stop, the image and metrics is separate producer/consumer work. |
 
 The manifest deliberately has no program ID, operator ID, destination ID,
 hostname, URL, stream key, token, signed request, free-form note, or raw error.
@@ -172,3 +172,63 @@ This change does not start capture, write production artifacts, upload media,
 alter delivery, or add runtime metrics. #17 remains the sole production-wiring
 boundary; when it implements these state transitions, runtime counters should
 use only the same closed state/error values and destination slots.
+
+## As-aired capture runtime (`as_aired_capture.py`)
+
+The module is opt-in and dark: nothing in the shipped image imports it or copies
+it yet, and `CaptureSettings.from_mapping` returns `None` unless `enabled` is
+exactly `true`. It records Croccante's final relay/filler output as a separate
+as-aired artifact; it never reads, writes, or replaces Alana's clean program
+master.
+
+- **Capture leg.** `build_capture_command` is `ffmpeg -c copy` into numbered
+  MPEG-TS segments under `<root>/<sessionId>/artifacts/`. The source must be an absolute local path or a credential-free `rtmp://`
+  URL whose host is exactly `127.0.0.1`, `localhost` or `::1`, never a destination. A segment is
+  registered only after the next segment exists (or the process ended), so a
+  half-written segment is never verified.
+- **Verification.** Each registered segment gets a SHA-256, byte length and an
+  ffprobe duration, and its video/audio codecs must equal the declared profile.
+  A mismatch discards the segment and closes the session `partial`. A segment
+  that cannot be probed is discarded as a visible `unobserved` gap (the session
+  can then only end `partial`) and later segments are renamed so artifact keys
+  stay contiguous. Finalization
+  concatenates the verified segments to `artifacts/final.ts`, re-hashes it, and
+  compares its size to the sum of the segments.
+- **Transitions and delivery.** `note_source("live"|"filler")` records relay and
+  filler intervals (live until the first filler is noted); time not covered by a
+  segment is `unobserved`. `begin_destination_attempt` / `end_destination_attempt`
+  record numbered slots with `accepted`, `failed`, `unknown` or in-progress
+  states. The slot number is the only destination identity written.
+- **Crash tolerance.** If the capture process dies, the session becomes
+  `interrupted` with `process_crashed`; `recover` restarts numbering where it
+  left off and the outage stays an `unobserved` gap. A session with a gap, no
+  segments, a failed final artifact, a quota stop, a codec change, or a failed or
+  unattempted destination ends `partial`, never `complete`. Failed sessions never
+  carry a final artifact.
+- **Evidence bounds.** The v1 caps (64 errors, transitions and source events,
+  32 attempts per slot) are never exceeded: when a session approaches one it
+  stops recording history and closes `partial` with `capture_interrupted`, so a
+  long broadcast with a flapping destination or publisher still ends with a
+  valid terminal manifest and report.
+- **Failure isolation.** `AsAiredCapture` never raises: every relay callback is
+  guarded, failures are counted (`snapshot()["recorder_failures"]`), a close that
+  cannot finalize writes a `failed` manifest, and an invalid manifest is never
+  written (the previous valid one stays). The report is
+  `render_session_report` of the validated manifest, written next to it.
+- **Quota and retention.** `maxSessionBytes` stops capture at the first segment
+  that would exceed it (`disk_full`); `maxTotalBytes` is checked before a session
+  records (a full store yields a `failed` preflight manifest). Opening a session
+  first runs `apply_retention`, which deletes expired terminal sessions and then
+  the oldest terminal sessions over the total quota. Legal holds, non-terminal
+  sessions and directories that are not valid sessions are never deleted.
+- **Observability.** `snapshot()` is the bounded surface (state, segment count,
+  bytes, failure count). Prometheus exposition belongs to the wiring work in
+  `relay_metrics.py`.
+
+Offsets of relay/filler transitions come from the host clock and the segment
+timeline from ffprobe durations, so a transition is accurate to the clock skew
+between them, not to a frame.
+
+Unverified here: a live relay soak, the Start/Stop wiring, image packaging, and
+real-time capture from a running relay. The ffmpeg command and the ffprobe
+parser were exercised against a synthetic MPEG-TS source during development.
