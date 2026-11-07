@@ -481,13 +481,37 @@ class IsolationTests(Base):
         self.assertTrue(gappy.session.terminal)
         self.assertEqual(gappy.failures, 0)
 
-    def test_relay_calls_with_bad_arguments_are_isolated(self) -> None:
+    def test_relay_calls_with_bad_arguments_are_isolated_and_leave_state_valid(self) -> None:
         cap = self.facade()
         cap.note_source("sideways")
         cap.destination_started(99)
-        cap.destination_ended(99, "failed", 0, None)
-        self.assertEqual(cap.failures, 3)
-        self.assertEqual(cap.session.state, "recording")
+        cap.destination_started(True)
+        cap.destination_ended(1, "accepted", 5, None)  # nothing in progress
+        cap.destination_started(1)
+        cap.destination_started(1)  # already in progress
+        for status, observed, code in (("accepted", 0, None), ("in_progress", 0, None), ("accepted", True, None), ("failed", -1, "destination_unavailable"), ("failed", 0, "made_up"), ("bogus", 0, None)):
+            cap.destination_ended(1, status, observed, code)
+        self.assertEqual(cap.failures, 11)
+        # Refused evidence never entered state, so the session still closes validly.
+        cap.destination_ended(1, "unknown", 0, None)
+        self.segment(cap.session.directory, 1)
+        cap.close()
+        manifest = load_manifest(cap.session.directory / "manifest.json", artifact_root=cap.session.directory)
+        self.assertEqual(manifest["destinations"][0]["attempts"][0]["errorCode"], "destination_unavailable")
+        self.assertEqual(cap.failures, 11)
+
+    def test_many_unprobeable_segments_in_one_poll_stay_within_the_error_bound(self) -> None:
+        def broken(_path):
+            raise OSError("ffprobe unavailable")
+
+        cap = self.facade(probe=broken, destination_count=1)
+        for number in range(1, 80):
+            self.segment(cap.session.directory, number)
+        cap.poll()
+        manifest = load_manifest(cap.session.directory / "manifest.json")
+        self.assertEqual(manifest["state"], "partial")
+        self.assertLessEqual(len(manifest["errors"]), 64)
+        self.assertEqual(cap.failures, 0)
 
     def test_invalid_manifest_is_never_published(self) -> None:
         cap = self.facade()

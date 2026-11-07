@@ -30,6 +30,8 @@ from urllib.parse import urlsplit
 from recording_manifest import (
     CLASSIFICATIONS,
     CONTRACT_VERSION,
+    DESTINATION_ATTEMPT_STATUSES,
+    ERROR_CODES,
     MAX_ATTEMPTS,
     MAX_DESTINATIONS,
     MAX_ERRORS,
@@ -343,15 +345,33 @@ class AsAiredSession:
             self._noted.append((offset, mode))
 
     def begin_destination_attempt(self, slot: int) -> None:
-        attempts = self._destinations[slot - 1]
+        attempts = self._attempts(slot)
+        if attempts and attempts[-1]["status"] == "in_progress":
+            raise CaptureConfigError("attempt_already_in_progress")
         attempts.append({"sequence": len(attempts) + 1, "startedAt": _iso(self._now()), "endedAt": None, "status": "in_progress", "observedBytes": 0, "errorCode": None})
 
     def end_destination_attempt(self, slot: int, status: str, observed_bytes: int, error_code: str | None) -> None:
-        attempt = self._destinations[slot - 1][-1]
+        """Close the open attempt. Evidence the v1 contract would reject is refused
+        before it can enter session state."""
+
+        attempts = self._attempts(slot)
         code = None if status == "accepted" else error_code or "destination_unavailable"
-        attempt.update(endedAt=_iso(self._now()), status=status, observedBytes=observed_bytes, errorCode=code)
+        if (
+            not attempts or attempts[-1]["status"] != "in_progress"
+            or status not in DESTINATION_ATTEMPT_STATUSES - {"in_progress"}
+            or isinstance(observed_bytes, bool) or not isinstance(observed_bytes, int) or observed_bytes < 0
+            or (status == "accepted" and observed_bytes == 0)
+            or (code is not None and code not in ERROR_CODES)
+        ):
+            raise CaptureConfigError("invalid_destination_evidence")
+        attempts[-1].update(endedAt=_iso(self._now()), status=status, observedBytes=observed_bytes, errorCode=code)
         if code is not None:
             self.record_error("delivery", code, status == "failed")
+
+    def _attempts(self, slot: int) -> list[dict[str, Any]]:
+        if isinstance(slot, bool) or not isinstance(slot, int) or not 1 <= slot <= len(self._destinations):
+            raise CaptureConfigError("invalid_slot")
+        return self._destinations[slot - 1]
 
     def add_segment(self, path: Path, probe: Callable[[Path], dict[str, Any]]) -> bool:
         """Consume one finished capture file.
@@ -613,6 +633,8 @@ class AsAiredCapture:
             if not session.add_segment(current, self._probe):
                 self._stop_process()
                 break
+            if session.saturated:
+                break
         if not self._alive() and not self._stopped and session.state == "recording":
             session.interrupt("process_crashed")
             self._process = None
@@ -653,7 +675,7 @@ class AsAiredCapture:
         directory = session.directory / "artifacts"
         while True:
             current = directory / f"segment-{session.next_file_number:06d}.{EXTENSION}"
-            if not current.exists() or not session.add_segment(current, self._probe):
+            if not current.exists() or not session.add_segment(current, self._probe) or session.saturated:
                 break
 
     def snapshot(self) -> dict[str, int | str]:
