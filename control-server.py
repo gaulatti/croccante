@@ -38,7 +38,10 @@ CONTROL_PORT = int(os.environ.get("CONTROL_PORT", "8081"))
 PROGRAM_PATH = f"/v1/programs/{quote(PROGRAM_ID, safe='')}/session"
 FILLER_PATH = f"/v1/programs/{quote(PROGRAM_ID, safe='')}/fillers/"
 DESTINATION_PATH = f"/v1/programs/{quote(PROGRAM_ID, safe='')}/destinations/"
-FILLER_STORE = FillerStore(Path(os.environ.get("FILLER_STORE_DIR", "/var/lib/croccante/fillers")), PROGRAM_ID)
+FILLER_STORE = FillerStore(
+    Path(os.environ.get("FILLER_STORE_DIR", "/var/lib/croccante/fillers")), PROGRAM_ID,
+    exact_profiles=os.environ.get("CROCCANTE_EXACT_FILLER_PROFILE", "0") == "1",
+)
 METRICS = {"success": 0, "failure": 0, "conflict": 0}
 DESTINATION_METRICS = {"success": 0, "invalid": 0, "unavailable": 0, "conflict": 0}
 COMMAND_LOCK = threading.RLock()
@@ -154,6 +157,7 @@ def current_state() -> dict[str, object]:
         "lastCommand": load_last_command(),
         "filler": FILLER_STORE.public_state(active_filler) if active_filler else None,
         "lastPreparation": load_json(CONTROL_DIR / "last-preparation.json"),
+        **({"fillerProfileContractVersion": 2} if FILLER_STORE.exact_profiles else {}),
     }
 
 
@@ -239,7 +243,7 @@ def apply_command(
             state["error"] = "a bounded destination selection is required"
             return 400, state
         try:
-            prepared = bool(filler_version and FILLER_STORE.manifest(filler_version))
+            prepared = bool(filler_version and FILLER_STORE.ready_for_start(filler_version))
         except PreparationError:
             prepared = False
         if not prepared:

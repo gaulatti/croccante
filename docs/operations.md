@@ -365,3 +365,22 @@ The expected parent mode is root-owned `0710` with group `nginx`; only the two
 hook leaves are nginx-writable. A root-owned `0700` parent makes
 `exec_publish` fail silently even when the leaf ownership is correct. Do not
 make the control tree readable as a workaround.
+
+### Complete filler profile rollout
+
+The exact-profile path is opt-in with `CROCCANTE_EXACT_FILLER_PROFILE=1`; leave it
+unset/off for existing sessions. First qualify the effective Alana live profile
+and paired consumer contract, then stop the session before changing settings or
+selecting a newly prepared contract-2 version. Inspect the private session
+capability and the full acknowledged profile, source checksum and artifact
+checksum. Invalid profiles return the existing 422 preparation failure; semantic
+version conflicts remain 409. Neither failure replaces known-good prepared media.
+
+A contract-2 Start revalidates the local stream; it cannot reuse a legacy profile
+as though it carried the missing encoding identity. Pending edits never switch
+an active artifact. Reconcile readiness/version after a restart; do not infer
+playback from an accepted request. Roll back while stopped by disabling the flag
+and reconciling the renderer setting/selected prepared version; retained artifacts
+are not deleted. The native owner intent and normal deployment gate still apply.
+See the README's complete-profile contract and Alana #29 for the paired source
+qualification. No production activation is performed by the source PR.
