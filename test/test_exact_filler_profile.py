@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -114,6 +115,45 @@ class ExactFillerRuntimeTest(legacy.FillerStoreRuntimeTest):
     def request(self, asset, command="command-a"):
         return {**super().request(asset, command), "profile": dict(FULL)}
 
+    def assert_decodes(self, path):
+        # Decode every video/audio packet, not just the readable stream headers.
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-xerror",
+            "-err_detect", "explode", "-i", str(path),
+            "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-",
+        ], check=True, capture_output=True, text=True, timeout=30)
+
+    def assert_prepared(self, asset, version):
+        result = super().assert_prepared(asset, version)
+        self.assert_decodes(self.store.version_dir(version) / "filler.flv")
+        return result
+
+    def test_full_decode_rejects_corrupt_packets_with_readable_stream_headers(self):
+        self.assert_prepared("audio.webm", "decode-control")
+        path = self.store.version_dir("decode-control") / "filler.flv"
+        data = bytearray(path.read_bytes())
+        position = int.from_bytes(data[5:9], "big") + 4
+        damaged = 0
+        while position + 15 <= len(data):
+            size = int.from_bytes(data[position + 1:position + 4], "big")
+            end = position + 11 + size
+            if end + 4 > len(data):
+                self.fail("Fixture contains an incomplete FLV tag")
+            if data[position] == 9 and size > 9 and data[position + 12] == 1:
+                data[position + 16:end] = b"\xff" * (end - position - 16)
+                damaged += 1
+            position = end + 4
+        self.assertGreater(damaged, 0)
+        corrupt = self.store.root / "readable-headers-corrupt-packets.flv"
+        corrupt.write_bytes(data)
+        probe = subprocess.run([
+            "ffprobe", "-v", "error", "-show_streams", "-of", "json", str(corrupt),
+        ], check=True, capture_output=True, text=True)
+        self.assertEqual({stream["codec_type"] for stream in json.loads(probe.stdout)["streams"]},
+                         {"video", "audio"})
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.assert_decodes(corrupt)
+
     def test_complete_profile_is_real_and_ready_after_offline_restart(self):
         result = self.assert_prepared("audio.webm", "exact-v2")
         self.assertEqual(result["profile"], FULL)
@@ -158,6 +198,7 @@ class ExactFillerRuntimeTest(legacy.FillerStoreRuntimeTest):
         result = self.store.prepare("main-v2", request, "now")
         self.assertEqual(result["profile"], request["profile"])
         self.assertTrue(self.store.ready_for_start("main-v2"))
+        self.assert_decodes(self.store.version_dir("main-v2") / "filler.flv")
 
 
 # Reuse the normal private HTTP fixture (real token-file authentication, command

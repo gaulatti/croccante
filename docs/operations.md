@@ -384,3 +384,8 @@ and reconciling the renderer setting/selected prepared version; retained artifac
 are not deleted. The native owner intent and normal deployment gate still apply.
 See the README's complete-profile contract and Alana #29 for the paired source
 qualification. No production activation is performed by the source PR.
+
+The exact-profile real-media regression suite decodes every output audio/video
+packet with ffmpeg `-xerror -err_detect explode`, in addition to probing stream
+metadata. Its damaged-NAL negative control retains readable stream headers while
+failing full decode; metadata alone is not playback evidence.
