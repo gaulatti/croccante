@@ -19,7 +19,9 @@ _VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SECRET_ID = re.compile(r"^[A-Za-z0-9/_+=,.@:-]{1,512}$")
 _HOST = re.compile(r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$")
 _APP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
-_SECRET_FIELDS = frozenset({"scheme", "host", "port", "application", "streamKey"})
+_RTMP_FIELDS = frozenset({"scheme", "host", "port", "application", "streamKey"})
+_SRT_FIELDS = frozenset({"scheme", "host", "port", "streamId", "passphrase"})
+_SECRET_FIELDS = _RTMP_FIELDS | _SRT_FIELDS
 
 
 class DestinationError(Exception):
@@ -111,31 +113,59 @@ def _valid_host(host: str) -> bool:
 
 
 def build_url(secret: Mapping[str, object]) -> str:
-    if set(secret) - _SECRET_FIELDS or not {"scheme", "host", "application", "streamKey"}.issubset(secret):
+    if set(secret) - _SECRET_FIELDS or not {"scheme", "host"}.issubset(secret):
         raise DestinationError("invalid_secret_payload")
     scheme = secret.get("scheme")
-    host = secret.get("host")
-    application = secret.get("application")
-    stream_key = secret.get("streamKey")
-    port = secret.get("port")
-    if scheme not in ("rtmp", "rtmps"):
+    if scheme in ("rtmp", "rtmps"):
+        if not {"application", "streamKey"}.issubset(secret) or set(secret) - _RTMP_FIELDS:
+            raise DestinationError("invalid_secret_payload")
+    elif scheme == "srt":
+        if set(secret) - _SRT_FIELDS:
+            raise DestinationError("invalid_secret_payload")
+    else:
         raise DestinationError("unsupported_scheme")
+
+    host = secret.get("host")
+    port = secret.get("port")
     if not isinstance(host, str) or not _valid_host(host):
         raise DestinationError("invalid_host")
-    if not isinstance(application, str) or not _APP.fullmatch(application) or ".." in application.split("/"):
-        raise DestinationError("invalid_application")
-    if not isinstance(stream_key, str) or not 1 <= len(stream_key) <= 512 or any(char.isspace() or ord(char) < 32 for char in stream_key):
-        raise DestinationError("invalid_stream_key")
+    if port is not None:
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise DestinationError("invalid_port")
+
     try:
         authority = f"[{host}]" if ipaddress.ip_address(host).version == 6 else host
     except ValueError:
         authority = host
     if port is not None:
-        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
-            raise DestinationError("invalid_port")
         authority = f"{authority}:{port}"
-    encoded_key = quote(stream_key, safe="-._~")
-    return f"{scheme}://{authority}/{application}/{encoded_key}"
+
+    if scheme in ("rtmp", "rtmps"):
+        application = secret.get("application")
+        stream_key = secret.get("streamKey")
+        if not isinstance(application, str) or not _APP.fullmatch(application) or ".." in application.split("/"):
+            raise DestinationError("invalid_application")
+        if not isinstance(stream_key, str) or not 1 <= len(stream_key) <= 512 or any(char.isspace() or ord(char) < 32 for char in stream_key):
+            raise DestinationError("invalid_stream_key")
+        encoded_key = quote(stream_key, safe="-._~")
+        return f"{scheme}://{authority}/{application}/{encoded_key}"
+
+    stream_id = secret.get("streamId")
+    passphrase = secret.get("passphrase")
+    if stream_id is not None:
+        if not isinstance(stream_id, str) or not 1 <= len(stream_id) <= 512 or any(char.isspace() or ord(char) < 32 or ord(char) > 126 or char in "&?#" for char in stream_id):
+            raise DestinationError("invalid_stream_id")
+    if passphrase is not None:
+        if not isinstance(passphrase, str) or not 10 <= len(passphrase) <= 64 or any(char.isspace() or ord(char) < 32 or ord(char) > 126 or char in "&?#" for char in passphrase):
+            raise DestinationError("invalid_passphrase")
+
+    query_params: list[str] = []
+    if stream_id is not None:
+        query_params.append(f"streamid={stream_id}")
+    if passphrase is not None:
+        query_params.append(f"passphrase={passphrase}")
+    query = f"?{'&'.join(query_params)}" if query_params else ""
+    return f"srt://{authority}{query}"
 
 
 def resolve_selection(selection: DestinationSelection, provider: SecretProvider) -> ResolvedSelection:
