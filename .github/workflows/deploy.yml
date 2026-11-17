@@ -122,7 +122,10 @@ jobs:
           username:    ${{ secrets.SERVER_USER }}
           key:         ${{ secrets.SERVER_SSH_KEY }}
           envs: GHCR_TOKEN,GHCR_USER,IMAGE_REF,IMAGE_LATEST,PROGRAM_ID,AWS_REGION
+          # The deploy host's login shell may be fish, so the script runs under
+          # sh explicitly (the Palazzo pattern). It must contain no single quote.
           script: |
+            sh -c '
             set -eu
 
             cleanup() { docker logout ghcr.io >/dev/null 2>&1 || true; }
@@ -165,7 +168,7 @@ jobs:
             # Fail the deploy if the new container is not actually healthy.
             echo "Waiting for health..."
             for i in $(seq 1 30); do
-              status=$(docker inspect -f '{{.State.Health.Status}}' croccante 2>/dev/null || echo starting)
+              status=$(docker inspect -f "{{.State.Health.Status}}" croccante 2>/dev/null || echo starting)
               [ "$status" = "healthy" ] && { echo "healthy after ${i}s"; break; }
               if [ "$status" = "unhealthy" ]; then
                 echo "container reported unhealthy:"
@@ -174,7 +177,8 @@ jobs:
               fi
               sleep 1
             done
-            [ "$(docker inspect -f '{{.State.Health.Status}}' croccante)" = "healthy" ] || {
+            [ "$(docker inspect -f "{{.State.Health.Status}}" croccante)" = "healthy" ] || {
               echo "container never became healthy:"; docker logs --tail 50 croccante; exit 1; }
 
             docker image prune -f >/dev/null
+            '
