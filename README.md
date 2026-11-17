@@ -179,3 +179,60 @@ croccante/
 ├── test/smoke.sh        # End-to-end harness against local sinks
 └── .github/workflows/deploy.yml
 ```
+
+### Opt-in complete filler profile
+
+`CROCCANTE_EXACT_FILLER_PROFILE=1` enables profile contract 2 for this one-program
+runtime. It defaults off. With it off, existing requests, encoder arguments,
+state and Start behavior retain the legacy contract. Change the setting only
+while the session is stopped; it never replaces an active artifact. The session
+status advertises `fillerProfileContractVersion: 2` only when enabled.
+
+Contract 2 requires all nine existing profile fields (including an explicit
+`loopSeconds`) and these additional fields:
+
+| Field | Contract |
+| --- | --- |
+| `contractVersion` | Integer `2` |
+| `videoMinrate` | Explicit `null` for no minimum, or a positive `k`/`M` bitrate no greater than `videoBitrate` |
+| `videoMaxrate`, `videoBufsize` | Positive `k`/`M` values; maximum is not below target bitrate |
+| `h264Profile`, `pixelFormat` | `baseline`, `main` or `high` with `yuv420p`; `high444` with `yuv444p` |
+| `h264Level` | Explicit supported H.264 level identifier, e.g. integer `40` for level 4.0 |
+| `maxBFrames` | Integer 0–16; baseline requires 0 |
+| `minKeyint` | Integer 1–`gop` |
+| `sceneThreshold` | Integer 0–100 |
+| `encoderPreset` | A supported libx264 preset (`ultrafast` through `placebo`) |
+
+Types are strict: omitted fields, stringified numbers, booleans used as integers,
+unknown fields and unsupported combinations are rejected. Preparation uses the
+explicit libx264 settings with the `zerolatency` tune and supplied overrides.
+The acknowledged profile is complete and participates in the immutable request
+hash; changing a version's configuration remains a conflict. A valid field set
+alone does not promise readiness: encoding must succeed and the observed codec,
+dimensions, rate, pixel format, H.264 profile/level, reordering bound and audio
+format must agree. Rate-control and GOP fields describe actual encoder options,
+not a claim that every frame has an exact instantaneous bitrate.
+
+The producer retains the configured min/max/buffer independently. It does not
+silently replace them with `videoBitrate`. Start rechecks the local artifact's
+checksum and observable stream properties without fetching its source. Failed
+preparation/revalidation retains previously prepared media. A legacy version
+remains available and unchanged, but cannot authorize a contract-2 Start; prepare
+a new version explicitly. Rollback disables this setting and restores legacy
+acceptance without deleting artifacts; coordinate the matching renderer's
+setting and selected version while stopped.
+
+This producer cannot establish what Alana is actually rendering. The qualified
+consumer in [Alana #29](https://github.com/gaulatti/alana/issues/29) must derive the
+actual effective live profile, check capability before preparation and compare
+the complete acknowledgement. Do not use README sample values as live authority
+or enable this against an unqualified producer/consumer pair. Audio normalization
+and loudness policy remain owned by Alana #27.
+
+`test/test_exact_filler_profile.py` executes real image, silent video and WebM
+preparation, private authenticated HTTP preparation/Start, version conflict,
+wrong-program/no-token rejection and restart revalidation. Destination supervision
+in the HTTP fixture is explicitly local; it does not prove a production broadcast.
+The native coverage recipe remains unchanged. Shipping paths still require the
+existing owner intent and normal deployment gate; this source change does not
+authorize a production deployment by itself.
