@@ -29,6 +29,13 @@ to twenty opaque IDs and versioned AWS Secrets Manager references:
 }
 ```
 
+Both the selection and each destination must carry these keys. A key Croccante
+does not know, on the selection, on a destination or on the
+`PUT /destinations/{version}` body, is ignored rather than refused
+(gaulatti/ariston#217): it is never read, so it cannot reach a resolved URL or
+the selection hash, and it is counted in
+`croccante_destination_unknown_keys_total{level="request|selection|destination"}`.
+
 Each referenced secret is a strict JSON object containing only `scheme`,
 `host`, optional `port`, `application`, and `streamKey`. Croccante resolves
 every exact version before opening any output and binds the resulting selection
@@ -154,7 +161,7 @@ replaces the live relay and interrupts a broadcast for a few seconds.
 croccante/
 ├── Dockerfile           # Alpine + nginx-mod-rtmp + ffmpeg
 ├── nginx.conf           # RTMP ingest + loopback stat endpoint (static, not templated)
-├── destination_store.py # Strict selection parsing and exact secret resolution
+├── destination_store.py # Selection parsing (unknown keys ignored) and exact secret resolution
 ├── destination_runtime.py # Atomic supervisor ownership for one session
 ├── destination_url_shim.c # Keeps resolved output URLs out of ffmpeg argv
 ├── entrypoint.sh        # Initializes stopped state and execs nginx

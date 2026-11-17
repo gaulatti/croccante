@@ -9,7 +9,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 from urllib.parse import quote
 
 
@@ -63,9 +63,28 @@ def canonical_json(value: object) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
 
-def parse_selection(value: object, *, expected_version: str | None = None) -> DestinationSelection:
-    if not isinstance(value, dict) or set(value) != {"version", "destinations"}:
+_SELECTION_KEYS = frozenset({"version", "destinations"})
+_REFERENCE_KEYS = frozenset({"id", "secretId", "versionId"})
+
+
+def parse_selection(
+    value: object,
+    *,
+    expected_version: str | None = None,
+    on_unknown: Callable[[str], None] | None = None,
+) -> DestinationSelection:
+    """Parse a transport-only destination selection.
+
+    A key Croccante does not know, on the selection or on a destination, is
+    ignored rather than refused (gaulatti/ariston#217): it is never read, so it
+    cannot reach a resolved URL or the selection hash. ``on_unknown`` is called
+    once per such key with the bounded level ``selection`` or ``destination``,
+    only when the selection is accepted. Every known key is still required and
+    validated.
+    """
+    if not isinstance(value, dict) or not _SELECTION_KEYS <= set(value):
         raise DestinationError("invalid_selection")
+    unknown = ["selection"] * len(set(value) - _SELECTION_KEYS)
     version = value.get("version")
     destinations = value.get("destinations")
     if not isinstance(version, str) or not _VERSION.fullmatch(version):
@@ -78,8 +97,9 @@ def parse_selection(value: object, *, expected_version: str | None = None) -> De
     references: list[DestinationReference] = []
     seen: set[str] = set()
     for item in destinations:
-        if not isinstance(item, dict) or set(item) != {"id", "secretId", "versionId"}:
+        if not isinstance(item, dict) or not _REFERENCE_KEYS <= set(item):
             raise DestinationError("invalid_reference")
+        unknown += ["destination"] * len(set(item) - _REFERENCE_KEYS)
         destination_id = item.get("id")
         secret_id = item.get("secretId")
         version_id = item.get("versionId")
@@ -99,6 +119,9 @@ def parse_selection(value: object, *, expected_version: str | None = None) -> De
         for item in references
     ]
     selection_hash = hashlib.sha256(canonical_json({"version": version, "destinations": digest_payload}).encode()).hexdigest()
+    if on_unknown:
+        for level in unknown:
+            on_unknown(level)
     return DestinationSelection(version, tuple(references), selection_hash)
 
 

@@ -582,7 +582,7 @@ class DestinationRoutesTest(ControlServerCase):
             "huge": {"headers": {"Idempotency-Key": "validate-1", "Content-Length": "70000"}},
             "not-json": {"raw": b"{nope"},
             "not-an-object": {"raw": b"[1, 2]"},
-            "extra-field": {"body": {**self.configuration(), "streamUrl": "rtmp://forbidden"}},
+            "missing-field": {"body": {"commandId": "validate-1", "version": "destinations-v1"}},
             "command-mismatch": {"body": self.configuration("someone-else")},
             "version-mismatch": {"body": self.configuration(version="destinations-v2")},
             "invalid-selection": {"body": {"commandId": "validate-1", "version": "destinations-v1", "destinations": []}},
@@ -591,6 +591,28 @@ class DestinationRoutesTest(ControlServerCase):
                 status, payload = self.put_destinations(**kwargs)
                 self.assertEqual((status, payload), (400, {"error": "invalid destination configuration" if name not in {"missing-key", "oversized-key", "bad-length", "tiny", "huge"} else "bounded body and Idempotency-Key are required"}))
         self.assertEqual(self.cs.DESTINATION_METRICS["invalid"], 2)
+
+    def test_unknown_keys_are_ignored_and_counted_at_every_level(self) -> None:
+        # gaulatti/ariston#217: a newer Alana may send keys Croccante does not
+        # know; they are ignored, counted by bounded level and never read.
+        plain_status, plain = self.put_destinations(body=self.configuration("validate-plain"), key="validate-plain")
+        self.assertEqual(plain_status, 200, plain)
+        body = {
+            "commandId": "validate-extended",
+            "version": "destinations-v1",
+            "destinations": [{**SELECTION["destinations"][0], "streamUrl": "rtmp://forbidden.example/x"}],
+            "priority": "high",
+            "note": "from a newer Alana",
+        }
+        status, payload = self.put_destinations(body=body, key="validate-extended")
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["selectionHash"], plain["selectionHash"])
+        self.assertNotIn("forbidden", json.dumps(payload))
+        self.assertEqual(self.cs.DESTINATION_UNKNOWN_KEYS, {"request": 2, "selection": 0, "destination": 1})
+        samples = parse_exposition(self.call("GET", "/metrics")[1]["text"])
+        unknown = {labels["level"]: value for name, labels, value in samples if name == "croccante_destination_unknown_keys_total"}
+        self.assertEqual(unknown, {"request": 2.0, "selection": 0.0, "destination": 1.0})
+        self.assertNotIn("forbidden", self.call("GET", "/metrics")[1]["text"])
 
     def test_version_segments_must_be_a_single_nonempty_component(self) -> None:
         self.assertEqual(self.put_destinations("", body=self.configuration())[0], 404)
@@ -751,6 +773,22 @@ class StartStopTest(ControlServerCase):
             status, payload = self.cs.apply_command("stop", "stop-late", 2, None, None)
         self.assertEqual(status, 200)
         self.assertEqual(payload["actualState"], "stopping")
+
+    def test_start_ignores_unknown_selection_keys_and_binds_the_same_selection(self) -> None:
+        # gaulatti/ariston#217: an unknown key no longer stops the broadcast.
+        self.prepare_version("v1")
+        extended = {
+            "version": SELECTION["version"],
+            "destinations": [{**SELECTION["destinations"][0], "label": "Main"}],
+            "region": "eu",
+        }
+        status, payload = self.start(selection=extended)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(self.cs.DESTINATION_UNKNOWN_KEYS, {"request": 0, "selection": 1, "destination": 1})
+        # The same key with the plain selection is the same command.
+        replay_status, replay = self.start(selection=SELECTION)
+        self.assertEqual(replay_status, 200, replay)
+        self.assertTrue(replay["commandResult"]["duplicate"])
 
     def test_start_without_a_destination_selection_is_refused(self) -> None:
         status, payload = self.cs.apply_command("start", "k", 1, "v1", None)

@@ -72,9 +72,41 @@ class DestinationStoreTest(unittest.TestCase):
                 for index in range(21)
             ]))
         with self.assertRaisesRegex(DestinationError, "invalid_reference"):
-            parse_selection(selection({"id": "a", "secretId": "s", "versionId": "v", "url": "rtmp://forbidden"}))
+            parse_selection(selection({"id": "a", "secretId": "s"}))
+        with self.assertRaisesRegex(DestinationError, "invalid_selection"):
+            parse_selection({"destinations": []})
         with self.assertRaisesRegex(DestinationError, "invalid_secret_reference"):
             parse_selection(selection({"id": "a", "secretId": "secret with spaces", "versionId": "v"}))
+
+    def test_ignores_unknown_keys_without_reading_them(self) -> None:
+        # gaulatti/ariston#217: a key Croccante does not know is ignored and
+        # reported, never refused and never read. A URL smuggled into a
+        # reference cannot reach the resolved destination or the hash.
+        seen: list[str] = []
+        plain = parse_selection(selection({"id": "a", "secretId": "s", "versionId": "version-a"}))
+        extended = parse_selection(
+            {
+                **selection({"id": "a", "secretId": "s", "versionId": "version-a", "url": "rtmp://forbidden", "label": "Main"}),
+                "priority": "high",
+            },
+            on_unknown=seen.append,
+        )
+        self.assertEqual(sorted(seen), ["destination", "destination", "selection"])
+        self.assertEqual(extended.selection_hash, plain.selection_hash)
+        self.assertEqual(extended.references, plain.references)
+        provider = DictProvider({("s", "version-a"): {"scheme": "rtmp", "host": "example.test", "application": "live", "streamKey": "key"}})
+        self.assertEqual(resolve_selection(extended, provider).destinations[0].url, "rtmp://example.test/live/key")
+
+    def test_reports_unknown_keys_only_for_an_accepted_selection(self) -> None:
+        seen: list[str] = []
+        with self.assertRaisesRegex(DestinationError, "invalid_destination_count"):
+            parse_selection({"version": "broadcast-v7", "destinations": [], "extra": 1}, on_unknown=seen.append)
+        self.assertEqual(seen, [])
+        # Without a listener, unknown keys are still ignored.
+        self.assertEqual(
+            parse_selection({**selection({"id": "a", "secretId": "s", "versionId": "version-a", "x": 1}), "y": 2}).version,
+            "broadcast-v7",
+        )
 
     def test_rejects_unsupported_or_overbroad_secret_payloads(self) -> None:
         with self.assertRaisesRegex(DestinationError, "unsupported_scheme"):

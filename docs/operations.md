@@ -213,7 +213,10 @@ Repeating the same version/request is safe; different content for an existing
 version returns `409`. Failed work leaves ready and active versions untouched.
 The authenticated `/metrics` surface uses only the bounded `outcome` label and
 reports preparation counts, ready-version inventory, and whether a session has
-a bound version. Version, program, source, command, URL, and credential values
+a bound version. `croccante_destination_unknown_keys_total{level}` counts
+destination request keys Croccante does not know and ignored, with `level`
+`request`, `selection` or `destination`, all exposed from 0; the key names are
+never labels. Version, program, source, command, URL, and credential values
 never become labels.
 
 Example from an authorized container on the private network (read the token

@@ -41,6 +41,14 @@ DESTINATION_PATH = f"/v1/programs/{quote(PROGRAM_ID, safe='')}/destinations/"
 FILLER_STORE = FillerStore(Path(os.environ.get("FILLER_STORE_DIR", "/var/lib/croccante/fillers")), PROGRAM_ID)
 METRICS = {"success": 0, "failure": 0, "conflict": 0}
 DESTINATION_METRICS = {"success": 0, "invalid": 0, "unavailable": 0, "conflict": 0}
+# Keys Croccante does not know in a destination request, ignored rather than
+# refused (gaulatti/ariston#217), by bounded level.
+DESTINATION_UNKNOWN_KEYS = {"request": 0, "selection": 0, "destination": 0}
+DESTINATION_REQUEST_KEYS = frozenset({"commandId", "version", "destinations"})
+
+
+def count_unknown_destination_key(level: str) -> None:
+    DESTINATION_UNKNOWN_KEYS[level] += 1
 COMMAND_LOCK = threading.RLock()
 PREPARATION_LOCK = threading.Lock()
 DESTINATION_RUNTIME = DestinationRuntime(STATE_DIR, os.environ.get("RELAY_SUPERVISOR", "/usr/local/bin/relay-dest.sh"))
@@ -452,6 +460,12 @@ class Handler(BaseHTTPRequestHandler):
         ]
         for outcome in ("success", "invalid", "unavailable", "conflict"):
             lines.append(f'croccante_destination_resolution_total{{outcome="{outcome}"}} {DESTINATION_METRICS[outcome]}')
+        lines += [
+            "# HELP croccante_destination_unknown_keys_total Destination request keys Croccante does not know, ignored.",
+            "# TYPE croccante_destination_unknown_keys_total counter",
+        ]
+        for level in ("request", "selection", "destination"):
+            lines.append(f'croccante_destination_unknown_keys_total{{level="{level}"}} {DESTINATION_UNKNOWN_KEYS[level]}')
         return "\n".join(lines) + "\n"
 
     def do_PUT(self) -> None:  # noqa: N802
@@ -475,12 +489,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 request = json.loads(self.rfile.read(length))
-                if not isinstance(request, dict) or set(request) != {"commandId", "version", "destinations"} or request.get("commandId") != key:
+                if not isinstance(request, dict) or not DESTINATION_REQUEST_KEYS <= set(request) or request.get("commandId") != key:
                     raise ValueError
                 selection = parse_selection(
                     {"version": request["version"], "destinations": request["destinations"]},
                     expected_version=version,
+                    on_unknown=count_unknown_destination_key,
                 )
+                for _key in set(request) - DESTINATION_REQUEST_KEYS:
+                    count_unknown_destination_key("request")
             except (json.JSONDecodeError, ValueError, DestinationError) as exc:
                 if isinstance(exc, DestinationError):
                     DESTINATION_METRICS["invalid"] += 1
@@ -592,7 +609,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": "a bounded destination selection is required"})
                 return
             try:
-                destination_selection = parse_selection(json.loads(self.rfile.read(length)))
+                destination_selection = parse_selection(
+                    json.loads(self.rfile.read(length)),
+                    on_unknown=count_unknown_destination_key,
+                )
             except (json.JSONDecodeError, DestinationError):
                 DESTINATION_METRICS["invalid"] += 1
                 self.send_json(400, {"error": "invalid destination selection"})

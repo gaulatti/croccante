@@ -43,7 +43,9 @@ class SelectionParsingTest(unittest.TestCase):
     def test_every_malformed_selection_has_a_stable_reason(self) -> None:
         cases = {
             "not-an-object": ("invalid_selection", ["x"]),
-            "extra-field": ("invalid_selection", {"version": "v1", "destinations": [REFERENCE], "extra": 1}),
+            "missing-version": ("invalid_selection", {"destinations": [REFERENCE]}),
+            "missing-destinations": ("invalid_selection", {"version": "v1"}),
+            "reference-missing-key": ("invalid_reference", {"version": "v1", "destinations": [{"id": "a", "secretId": "s"}]}),
             "version-type": ("invalid_version", {"version": 5, "destinations": [REFERENCE]}),
             "version-shape": ("invalid_version", {"version": "has space", "destinations": [REFERENCE]}),
             "destinations-type": ("invalid_destination_count", {"version": "v1", "destinations": "x"}),
