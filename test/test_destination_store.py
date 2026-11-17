@@ -150,9 +150,13 @@ class DestinationStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             supervisor = root / "supervisor.sh"
+            # The second destination's supervisor fails at its exec boundary
+            # and the first keeps running. The loser is chosen by index, not
+            # by racing a shared lock: an external `mkdir` is not atomic on
+            # every runner's coreutils, so a lock race could let both live.
             supervisor.write_text(
                 "#!/bin/sh\n"
-                "mkdir \"$0.lock\" 2>/dev/null || exit 1\n"
+                "[ \"$1\" = 2 ] && exit 1\n"
                 "trap 'exit 0' TERM INT\nwhile true; do sleep 1; done\n",
                 encoding="utf-8",
             )
@@ -170,8 +174,8 @@ class DestinationStoreTest(unittest.TestCase):
                 ("two", "v1"): {"scheme": "rtmp", "host": "two.example", "application": "live", "streamKey": "two"},
             })
             # The runtime's fixed fail-fast window is shorter than a loaded CI
-            # runner needs to schedule both shells, so the losing supervisor
-            # may not have run mkdir yet. Make the window deterministic by
+            # runner needs to schedule both shells, so the failing supervisor
+            # may not have exited yet. Make the window deterministic by
             # waiting (bounded) until one supervisor has really exited.
             spawned: list[subprocess.Popen[bytes]] = []
             real_popen = subprocess.Popen
@@ -191,6 +195,12 @@ class DestinationStoreTest(unittest.TestCase):
                     patch.object(destination_runtime.time, "sleep", wait_for_loser):
                 with self.assertRaisesRegex(DestinationError, "supervisor_start_failed"):
                     runtime.activate(resolve_selection(parsed, provider))
+            # Exactly the second supervisor failed on its own; the first was
+            # still running and was stopped by the rollback.
+            self.assertEqual(len(spawned), 2)
+            self.assertEqual(spawned[1].returncode, 1)
+            self.assertNotEqual(spawned[0].returncode, 1)
+            self.assertIsNotNone(spawned[0].returncode)
             self.assertIsNone(runtime.active)
             self.assertEqual(runtime.processes, [])
             self.assertEqual((root / "dest.count").read_text().strip(), "0")
