@@ -25,4 +25,21 @@ CONF
     echo "[sink] stunnel listening on 443 (TLS -> 1935)"
 fi
 
+if [ "${SRT:-0}" = "1" ]; then
+    SRT_PORT="${SRT_PORT:-9998}"
+    SRT_PARAM=""
+    if [ -n "${SRT_PASSPHRASE:-}" ]; then
+        SRT_PARAM="?passphrase=${SRT_PASSPHRASE}"
+    fi
+    if [ -n "${SRT_STREAMID:-}" ]; then
+        if [ -n "$SRT_PARAM" ]; then
+            SRT_PARAM="${SRT_PARAM}&streamid=${SRT_STREAMID}"
+        else
+            SRT_PARAM="?streamid=${SRT_STREAMID}"
+        fi
+    fi
+    srt-live-transmit "srt://:${SRT_PORT}${SRT_PARAM}" "file://con" >> /rec/srt.ts 2>> /rec/srt.log &
+    echo "[sink] srt-live-transmit listening on ${SRT_PORT}"
+fi
+
 exec nginx -g 'daemon off;'
