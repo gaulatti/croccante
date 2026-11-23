@@ -188,20 +188,27 @@ master.
   frame rate and audio format, which is what the relay carries), the number of destination
   slots and the destination selection hash. The session **opens when media first goes on
   air**, so the time before a publisher or filler is `unobserved`, not recorded as silence.
-- **Source.** While the publisher is live the capture reads the local relay input
+- **Source.** The relay's RTMP application is `live` (`nginx.conf`, and `RTMP_APP` for the relay and the
+  capture alike). While the publisher is live the capture reads the local relay input
   `rtmp://127.0.0.1:1935/<app>/<stream>`; when the relay falls back to filler it reads the
   active filler asset as a local file (real time, looped, as the destination supervisors
-  read it); back to live, it reads the input again. `AsAiredCapture.retarget` swaps the
+  read it); back to live, it reads the input again. A different publisher or filler version
+  under the same mode is followed too (the tick compares the source, not only the mode).
+  `AsAiredCapture.retarget` swaps the
   capture process without ending the session, and `note_source("live"|"filler")` records the
   transition.
 - **Destinations.** Once a second the runtime reads each slot's relay state: `relaying` or
   `filler` opens an attempt, `backoff` closes it `failed` (`destination_unavailable`). Stop
   closes open attempts against the final byte count: `accepted` when the relay put bytes on
-  air during the attempt, `unknown` otherwise. `observedBytes` is the as-aired bytes counted
-  at Croccante while the attempt was open, not an acknowledgement by the destination.
+  air during the attempt, `unknown` otherwise; a slot that leaves the air without failing (stopped,
+  waiting) ends its attempt at that moment. `observedBytes` is the program output the capture
+  verified while the attempt was open (the session's bytes, shared by every slot), not a
+  per-destination count and not an acknowledgement by the destination; because segments are
+  verified after the next one exists, it can lag by up to two segments.
 - **Stop** closes the session; joining the segments runs off the request, so a long recording
   does not delay the Stop response. A capture process that dies is `interrupted`
-  (`process_crashed`) and is restarted by the same once-a-second tick; the outage stays an
+  (`process_crashed`) and is restarted by the same once-a-second tick, the first time at once and then
+  after a pause that doubles (1, 2, 4 ... up to 60 s) for every restart that records no segment; the outage stays an
   `unobserved` gap and the session ends `partial`.
 - **Isolation.** Every call into the capture is guarded: a fault is counted
   (`croccante_as_aired_capture_recorder_failures_total`) and Start, Stop and delivery go on.

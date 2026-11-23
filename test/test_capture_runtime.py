@@ -207,6 +207,83 @@ class LifecycleTests(RuntimeCase):
         self.assertIn(manifest["state"], {"partial", "complete"})
 
 
+class FollowTests(RuntimeCase):
+    def sources(self) -> list[str]:
+        return [command[command.index("-i") + 1] for command in self.commands]
+
+    def test_a_new_publisher_under_the_same_mode_is_followed(self) -> None:
+        other = "rtmp://127.0.0.1:1935/live/encoder-b"
+        self.begin(count=1)
+        self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["relaying"])
+        self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["relaying"])
+        self.assertEqual(self.sources(), [LIVE])
+        self.runtime.tick(live_source=other, filler_source=None, destinations=["relaying"])
+        self.assertEqual(self.sources(), [LIVE, other])
+        self.assertTrue(self.processes[0].alive is False)
+        self.assertEqual(self.runtime.snapshot()["state"], "recording")
+
+    def test_a_new_filler_version_under_the_same_mode_is_followed(self) -> None:
+        newer = "/var/lib/croccante/fillers/abc/v2/filler.flv"
+        self.begin(count=1)
+        self.runtime.tick(live_source=None, filler_source=FILLER, destinations=["filler"])
+        self.runtime.tick(live_source=None, filler_source=newer, destinations=["filler"])
+        self.assertEqual(self.sources(), [FILLER, newer])
+
+    def test_a_slot_that_leaves_the_air_without_failing_ends_its_attempt_there(self) -> None:
+        self.begin(count=1)
+        self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["relaying"])
+        self.segment(1)
+        self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["relaying"])
+        self.segment(2)
+        self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["idle"])
+        self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["relaying"])
+        self.runtime.stop()
+        [manifest] = self.manifests()
+        validate_manifest(manifest)
+        attempts = manifest["destinations"][0]["attempts"]
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0]["status"], "accepted")
+        self.assertIsNotNone(attempts[0]["endedAt"])
+
+    def test_a_capture_process_that_keeps_dying_is_restarted_with_a_growing_pause(self) -> None:
+        self.begin(count=1)
+        self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["relaying"])
+        launches = [0]
+        for second in range(1, 40):
+            self.clock.advance(seconds=1)
+            before = len(self.processes)
+            self.processes[-1].alive = False
+            self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["relaying"])
+            if len(self.processes) > before:
+                launches.append(second)
+        gaps = [later - earlier for earlier, later in zip(launches, launches[1:])]
+        # The first restart follows the crash at once; each restart that records nothing doubles the
+        # pause before the next (1, 1, 2, 4, 8, 16 seconds between launches here).
+        self.assertEqual(gaps, [1, 1, 2, 4, 8, 16])
+
+    def test_a_restart_that_records_resets_the_pause(self) -> None:
+        self.begin(count=1)
+        self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["relaying"])
+        self.processes[-1].alive = False
+        self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["relaying"])
+        self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["relaying"])
+        self.segment(1)
+        self.segment(2)
+        self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["relaying"])
+        self.assertEqual(self.runtime._recoveries, 0)
+
+    def test_the_snapshot_never_waits_for_the_recorder(self) -> None:
+        self.begin(count=1)
+        self.runtime.tick(live_source=LIVE, filler_source=None, destinations=["relaying"])
+        result: list[dict] = []
+        with self.runtime._lock:  # a tick is in the middle of slow I/O
+            reader = __import__("threading").Thread(target=lambda: result.append(self.runtime.snapshot()))
+            reader.start()
+            reader.join(2)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["state"], "recording")
+
+
 class IsolationTests(RuntimeCase):
     def test_a_raising_recorder_never_raises_into_the_relay_and_is_counted(self) -> None:
         class Raising:
@@ -262,7 +339,7 @@ class IsolationTests(RuntimeCase):
 
             def snapshot(self) -> dict:
                 self.reads += 1
-                if self.reads > 1:
+                if self.reads > 2:
                     raise OSError("capture state unreadable")
                 return {"state": "recording", "segments": 0, "bytes": 0}
 

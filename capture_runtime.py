@@ -11,7 +11,7 @@ delivery goes on. Only slot numbers are recorded for destinations, never a URL o
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -28,6 +28,8 @@ SEGMENT_SECONDS = 6
 CLASSIFICATION = "internal"
 # Destinations the relay is putting media on: a slot in one of these states has an open attempt.
 ON_AIR = frozenset({"relaying", "filler"})
+# A capture process that keeps dying is restarted with a growing pause, up to this many seconds.
+MAX_RECOVER_PAUSE_SECONDS = 60
 
 
 def stream_profile(profile: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -64,6 +66,11 @@ class CaptureRuntime:
         self._plan: dict[str, Any] | None = None
         self._capture: Any | None = None
         self._mode: str | None = None
+        self._source: str | None = None
+        self._recoveries = 0
+        self._recover_after: datetime | None = None
+        self._segments_at_recover = 0
+        self._live_failures = 0
         self._open_slots: dict[int, int] = {}
         self._failures = 0
         self._last: dict[str, int | str] = {"state": "unavailable", "segments": 0, "bytes": 0}
@@ -96,11 +103,13 @@ class CaptureRuntime:
             try:
                 self._plan = None
                 capture, slots = self._capture, self._open_slots
-                self._capture, self._mode, self._open_slots = None, None, {}
+                self._capture, self._mode, self._source, self._open_slots = None, None, None, {}
                 if capture is None:
                     return
                 self._last = {**self._snapshot_of(capture)}
                 self._failures += int(getattr(capture, "failures", 0))
+                self._live_failures = 0
+                self._recoveries, self._recover_after, self._segments_at_recover = 0, None, 0
                 if self._close_in_background:
                     closer = threading.Thread(target=self._close, args=(capture, slots), name="as-aired-close")
                     self._closers = [item for item in self._closers if item.is_alive()] + [closer]
@@ -139,16 +148,34 @@ class CaptureRuntime:
                         return
                     self._open(source, mode)
                 capture = self._capture
-                if mode is not None and source is not None and mode != self._mode:
-                    capture.note_source(mode)
+                if mode is not None and source is not None and source != self._source:
+                    # A new input under the same mode (another publisher, another filler version) is
+                    # followed too, not only a change between live and filler.
+                    if mode != self._mode:
+                        capture.note_source(mode)
                     capture.retarget(source)
-                    self._mode = mode
+                    self._mode, self._source = mode, source
+                capture.poll()  # first, so an attempt that ends now is counted against the freshest bytes
                 self._follow_destinations(capture, destinations)
-                capture.poll()
-                capture.recover()
+                self._recover(capture)
                 self._last = self._snapshot_of(capture)
+                self._live_failures = int(getattr(capture, "failures", 0))
             except Exception:  # noqa: BLE001
                 self._failures += 1
+
+    def _recover(self, capture: Any) -> None:
+        """Restart a dead capture process, pausing longer after each restart that records nothing."""
+
+        snapshot = self._snapshot_of(capture)
+        if int(snapshot["segments"]) > self._segments_at_recover:
+            self._recoveries, self._segments_at_recover = 0, int(snapshot["segments"])
+        now = self._clock()
+        if snapshot["state"] != "interrupted" or (self._recover_after is not None and now < self._recover_after):
+            return
+        capture.recover()
+        self._recoveries += 1
+        pause = min(2 ** (self._recoveries - 1), MAX_RECOVER_PAUSE_SECONDS)
+        self._recover_after = now + timedelta(seconds=pause)
 
     def _open(self, source: str, mode: str) -> None:
         assert self._plan is not None
@@ -174,7 +201,7 @@ class CaptureRuntime:
             clock=self._clock,
             **self._capture_arguments,
         )
-        self._mode = mode
+        self._mode, self._source = mode, source
         self._capture.note_source(mode)
 
     def _bytes(self, capture: Any) -> int:
@@ -189,6 +216,9 @@ class CaptureRuntime:
             elif state == "backoff" and opened:
                 observed = max(0, self._bytes(capture) - self._open_slots.pop(slot))
                 capture.destination_ended(slot, "failed", observed, "destination_unavailable")
+            elif state not in ON_AIR and opened:
+                # The slot left the air without failing (stopped, waiting): the attempt ends here.
+                self._end_attempts(capture, {slot: self._open_slots.pop(slot)})
 
     def _end_attempts(self, capture: Any, slots: dict[int, int]) -> None:
         """Stop ends each open attempt against the final byte count: accepted when the relay put
@@ -209,10 +239,6 @@ class CaptureRuntime:
         return {"state": str(snapshot["state"]), "segments": int(snapshot["segments"]), "bytes": int(snapshot["bytes"])}
 
     def snapshot(self) -> dict[str, int | str]:
-        """Bounded facts for metrics: the session state, its size, and the recorder failures so far."""
+        """Bounded facts for metrics, from what the last tick saw: it never waits for the recorder."""
 
-        with self._lock:
-            current = self._capture
-            base = dict(self._snapshot_of(current)) if current is not None else dict(self._last)
-            failures = self._failures + (int(getattr(current, "failures", 0)) if current is not None else 0)
-            return {**base, "recorder_failures": failures}
+        return {**self._last, "recorder_failures": self._failures + self._live_failures}
