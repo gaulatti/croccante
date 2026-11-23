@@ -1,15 +1,17 @@
-// gaulatti/croccante#40: the remote deploy script runs under `sh -c '...'` because the deploy
-// host's login shell is fish. This dry-run check extracts the script from deploy.yml and
-// checks the wrapper, the single-quote rule, and the POSIX syntax of the body. It runs no
-// deploy and touches no server.
-import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
+// gaulatti/croccante#40 and #41: the remote deploy script runs under `sh -c '...'` because the
+// deploy host's login shell is fish. These dry-run checks extract the script from deploy.yml and
+// check the wrapper, the single-quote rule, the POSIX syntax, that every required variable is
+// checked by name before any container is touched, and that a missing variable fails with its
+// name printed. They run no deploy and touch no server.
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const workflow = readFileSync(new URL("../../.github/workflows/deploy.yml", import.meta.url), "utf8");
+const REQUIRED = ["GHCR_TOKEN", "GHCR_USER", "IMAGE_REF", "IMAGE_LATEST", "PROGRAM_ID", "AWS_REGION"];
 
 // The `script: |` block of the appleboy/ssh-action step, de-indented.
 function remoteScript(text) {
@@ -26,6 +28,7 @@ function remoteScript(text) {
   return body.join("\n").trimEnd();
 }
 
+// The text inside `sh -c '...'`.
 function wrappedBody(script) {
   return script.replace(/^sh -c '\n/, "").replace(/'\s*$/, "");
 }
@@ -37,22 +40,40 @@ test("the remote script is wrapped in sh -c, so a fish login shell cannot parse 
 });
 
 test("the wrapped body contains no single quote (the sh -c wrapper would end early)", () => {
-  const inner = wrappedBody(remoteScript(workflow));
-  assert.equal(inner.includes("'"), false, "no single quote inside the sh -c body");
+  assert.equal(wrappedBody(remoteScript(workflow)).includes("'"), false);
 });
 
 test("the body is valid POSIX sh (dry run with sh -n, nothing executed)", () => {
-  const inner = wrappedBody(remoteScript(workflow));
   const file = join(mkdtempSync(join(tmpdir(), "croccante-deploy-")), "deploy.sh");
-  writeFileSync(file, inner + "\n");
+  writeFileSync(file, wrappedBody(remoteScript(workflow)) + "\n");
   execFileSync("sh", ["-n", file], { stdio: "pipe" });
 });
 
-test("the body checks the required deploy variables before any container is stopped", () => {
-  const script = remoteScript(workflow);
-  for (const name of ["PROGRAM_ID", "AWS_REGION"]) {
-    assert.match(script, new RegExp(`test -n "\\$${name}"`), `${name} is checked`);
-  }
-  const stop = script.indexOf("docker stop croccante");
-  assert.ok(stop > script.indexOf('test -n "$PROGRAM_ID"'), "guards run before the stop");
+test("every required variable is checked by name before any container is stopped", () => {
+  const body = wrappedBody(remoteScript(workflow));
+  const loop = body.match(/for name in ([A-Z_ ]+); do\n\s*require_var "\$name"/);
+  assert.ok(loop, "the required variables are checked in a loop that calls require_var");
+  assert.deepEqual(loop[1].trim().split(/\s+/), REQUIRED, "the loop names exactly the required variables");
+  const check = body.indexOf("for name in");
+  assert.ok(check >= 0 && check < body.indexOf("docker stop croccante"), "the checks run before the stop");
+  assert.ok(body.indexOf("docker pull") < body.indexOf("docker stop croccante"), "the pull still runs before the stop");
+});
+
+test("every step announces itself, and a missing required variable fails naming it (dry run, docker stubbed)", () => {
+  const body = wrappedBody(remoteScript(workflow));
+  const dir = mkdtempSync(join(tmpdir(), "croccante-dry-"));
+  const script = join(dir, "deploy.sh");
+  writeFileSync(script, body + "\n");
+  // A docker that would record any call. It must never run: the variable check fails first.
+  const docker = join(dir, "docker");
+  writeFileSync(docker, `#!/bin/sh\necho "docker $*" >> "${dir}/calls"\nexit 0\n`);
+  chmodSync(docker, 0o755);
+  const env = { PATH: `${dir}:${process.env.PATH}`, GHCR_TOKEN: "t", GHCR_USER: "u", IMAGE_REF: "i", IMAGE_LATEST: "l", AWS_REGION: "r" };
+  const result = spawnSync("sh", [script], { env, encoding: "utf8" });
+  assert.notEqual(result.status, 0, "a missing PROGRAM_ID fails the script");
+  assert.match(result.stderr, /required variable PROGRAM_ID is not set/, "the failure names the variable");
+  assert.match(result.stdout, /==> checking required variables/, "the step is announced");
+  // The only docker call allowed is the logout in the EXIT trap; nothing pulls, stops or runs.
+  const calls = readFileSync(join(dir, "calls"), "utf8").trim().split("\n");
+  assert.deepEqual(calls.filter((call) => !call.startsWith("docker logout")), [], "no pull, stop or run happened");
 });
