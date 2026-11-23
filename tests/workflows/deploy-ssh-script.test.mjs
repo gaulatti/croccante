@@ -4,7 +4,7 @@
 // checked by name before any container is touched, and that a missing variable fails with its
 // name printed. They run no deploy and touch no server.
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -76,4 +76,27 @@ test("every step announces itself, and a missing required variable fails naming 
   // The only docker call allowed is the logout in the EXIT trap; nothing pulls, stops or runs.
   const calls = readFileSync(join(dir, "calls"), "utf8").trim().split("\n");
   assert.deepEqual(calls.filter((call) => !call.startsWith("docker logout")), [], "no pull, stop or run happened");
+});
+
+test("a missing host credential file fails naming the file, before any container is touched (dry run, docker stubbed)", () => {
+  const body = wrappedBody(remoteScript(workflow));
+  const dir = mkdtempSync(join(tmpdir(), "croccante-file-"));
+  // Point the two host paths at the temporary directory: the control token is absent, the credentials present.
+  writeFileSync(join(dir, "aws-credentials"), "[default]\n");
+  const script = join(dir, "deploy.sh");
+  writeFileSync(
+    script,
+    body
+      .replaceAll("/opt/croccante/control-token", join(dir, "control-token"))
+      .replaceAll("/opt/croccante/aws-credentials", join(dir, "aws-credentials")) + "\n",
+  );
+  const docker = join(dir, "docker");
+  writeFileSync(docker, `#!/bin/sh\necho "docker $*" >> "${dir}/calls"\nexit 0\n`);
+  chmodSync(docker, 0o755);
+  const env = { PATH: `${dir}:${process.env.PATH}`, GHCR_TOKEN: "t", GHCR_USER: "u", IMAGE_REF: "i", IMAGE_LATEST: "l", PROGRAM_ID: "p", AWS_REGION: "r" };
+  const result = spawnSync("sh", [script], { env, encoding: "utf8" });
+  assert.notEqual(result.status, 0, "a missing control token fails the script");
+  assert.match(result.stderr, new RegExp(`required file ${join(dir, "control-token")} is missing or empty`), "the failure names the file");
+  const calls = existsSync(join(dir, "calls")) ? readFileSync(join(dir, "calls"), "utf8").trim().split("\n") : [];
+  assert.deepEqual(calls.filter((call) => !call.startsWith("docker logout")), [], "no login, pull, stop or run happened");
 });
