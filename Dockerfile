@@ -21,7 +21,7 @@ RUN apk add --no-cache \
         py3-boto3 \
         ca-certificates \
     && update-ca-certificates \
-    && mkdir -p /var/log/nginx /run/nginx
+    && mkdir -p /var/log/nginx /run/nginx /var/lib/croccante/as-aired
 
 COPY nginx.conf        /etc/nginx/nginx.conf
 COPY relay-lib.sh      /usr/local/bin/relay-lib.sh
@@ -35,6 +35,9 @@ COPY destination_runtime.py /usr/local/bin/destination_runtime.py
 COPY --from=destination-shim-builder /tmp/croccante-destination-shim.so /usr/local/lib/croccante-destination-shim.so
 COPY relay_metrics.py  /usr/local/bin/relay_metrics.py
 COPY filler_store.py   /usr/local/bin/filler_store.py
+COPY as_aired_capture.py /usr/local/bin/as_aired_capture.py
+COPY capture_runtime.py /usr/local/bin/capture_runtime.py
+COPY recording_manifest.py /usr/local/bin/recording_manifest.py
 COPY entrypoint.sh     /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh /usr/local/bin/relay-*.sh /usr/local/bin/healthcheck.sh /usr/local/bin/control-server.py

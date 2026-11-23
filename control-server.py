@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
+from capture_runtime import CaptureRuntime
 from destination_runtime import DestinationRuntime
 from destination_store import (
     DestinationError,
@@ -49,6 +50,11 @@ DESTINATION_REQUEST_KEYS = frozenset({"commandId", "version", "destinations"})
 
 def count_unknown_destination_key(level: str) -> None:
     DESTINATION_UNKNOWN_KEYS[level] += 1
+# As-aired capture: always on, bounded by capture_runtime's storage limits, and failure-isolated.
+CAPTURE_ROOT = Path("/var/lib/croccante/as-aired")
+CAPTURE_INTERVAL_SECONDS = 1.0
+RTMP_APP = os.environ.get("RTMP_APP", "live")
+CAPTURE = CaptureRuntime(CAPTURE_ROOT)
 COMMAND_LOCK = threading.RLock()
 PREPARATION_LOCK = threading.Lock()
 DESTINATION_RUNTIME = DestinationRuntime(STATE_DIR, os.environ.get("RELAY_SUPERVISOR", "/usr/local/bin/relay-dest.sh"))
@@ -210,6 +216,43 @@ def resolve_destinations(selection: DestinationSelection):
     return resolved
 
 
+def capture_started(filler_version: str) -> None:
+    def action() -> None:
+        manifest = FILLER_STORE.manifest(filler_version)
+        active = DESTINATION_RUNTIME.active
+        CAPTURE.start(
+            profile=manifest["profile"],
+            destination_count=len(active.destinations),
+            configuration_hash=active.selection.selection_hash,
+        )
+
+    CAPTURE.guard(action)
+
+
+def capture_tick() -> None:
+    """Tell the capture what the relay is doing: its source and each destination's state."""
+
+    def action() -> None:
+        state = current_state()
+        stream = read_text(HOOK_DIR / "publisher")
+        live = f"rtmp://127.0.0.1:1935/{RTMP_APP}/{stream}" if state["mode"] == "live" and stream else None
+        version = read_text(CONTROL_DIR / "active-filler.version")
+        filler = str(FILLER_STORE.version_dir(version) / "filler.flv") if state["mode"] == "filler" and version else None
+        CAPTURE.tick(
+            live_source=live,
+            filler_source=filler,
+            destinations=[str(item["mode"]) for item in state["destinations"]],
+        )
+
+    CAPTURE.guard(action)
+
+
+def run_capture() -> None:
+    while True:
+        time.sleep(CAPTURE_INTERVAL_SECONDS)
+        capture_tick()
+
+
 def apply_command(
     action: str,
     key: str,
@@ -291,6 +334,7 @@ def apply_command(
                 state["error"] = "runtime_activation_failed"
                 return 503, state
             result = "started"
+            capture_started(filler_version)
     else:
         if current == "stopped":
             result = "already-stopped"
@@ -302,6 +346,7 @@ def apply_command(
             atomic_write(CONTROL_DIR / "stopped.at", now())
             DESTINATION_RUNTIME.deactivate()
             result = "stopped"
+            CAPTURE.stop()
 
     record = {
         "id": key,
@@ -377,7 +422,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_metrics(self) -> None:
         try:
-            body = (relay_metrics.collect() + self.filler_metrics()).encode("utf-8")
+            body = (relay_metrics.collect() + self.filler_metrics() + relay_metrics.render_capture(CAPTURE.snapshot())).encode("utf-8")
         except Exception:
             self.send_json(500, {"error": "metrics unavailable"})
             return
@@ -628,7 +673,11 @@ def main() -> None:
     (CONTROL_DIR / "destination-commands").mkdir(exist_ok=True)
     if not (CONTROL_DIR / "requested.state").exists():
         atomic_write(CONTROL_DIR / "requested.state", "stopped")
+    threading.Thread(target=run_capture, name="as-aired-capture", daemon=True).start()
+
     def stop_runtime(*_args: object) -> None:
+        CAPTURE.stop()
+        CAPTURE.wait(10)
         DESTINATION_RUNTIME.deactivate()
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, stop_runtime)

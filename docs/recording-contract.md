@@ -175,11 +175,51 @@ use only the same closed state/error values and destination slots.
 
 ## As-aired capture runtime (`as_aired_capture.py`)
 
-The module is opt-in and dark: nothing in the shipped image imports it or copies
-it yet, and `CaptureSettings.from_mapping` returns `None` unless `enabled` is
-exactly `true`. It records Croccante's final relay/filler output as a separate
+The recorder is always on: the image contains `as_aired_capture.py`,
+`capture_runtime.py` and `recording_manifest.py`, the lifecycle API opens a session
+for every Start, and there is no setting that turns capture off (the storage bounds
+below are the safety). It records Croccante's final relay/filler output as a separate
 as-aired artifact; it never reads, writes, or replaces Alana's clean program
 master.
+
+### Wiring (`capture_runtime.py`, `control-server.py`)
+
+- **Start** hands the runtime the prepared broadcast profile (the filler's width, height,
+  frame rate and audio format, which is what the relay carries), the number of destination
+  slots and the destination selection hash. The session **opens when media first goes on
+  air**, so the time before a publisher or filler is `unobserved`, not recorded as silence.
+- **Source.** While the publisher is live the capture reads the local relay input
+  `rtmp://127.0.0.1:1935/<app>/<stream>`; when the relay falls back to filler it reads the
+  active filler asset as a local file (real time, looped, as the destination supervisors
+  read it); back to live, it reads the input again. `AsAiredCapture.retarget` swaps the
+  capture process without ending the session, and `note_source("live"|"filler")` records the
+  transition.
+- **Destinations.** Once a second the runtime reads each slot's relay state: `relaying` or
+  `filler` opens an attempt, `backoff` closes it `failed` (`destination_unavailable`). Stop
+  closes open attempts against the final byte count: `accepted` when the relay put bytes on
+  air during the attempt, `unknown` otherwise. `observedBytes` is the as-aired bytes counted
+  at Croccante while the attempt was open, not an acknowledgement by the destination.
+- **Stop** closes the session; joining the segments runs off the request, so a long recording
+  does not delay the Stop response. A capture process that dies is `interrupted`
+  (`process_crashed`) and is restarted by the same once-a-second tick; the outage stays an
+  `unobserved` gap and the session ends `partial`.
+- **Isolation.** Every call into the capture is guarded: a fault is counted
+  (`croccante_as_aired_capture_recorder_failures_total`) and Start, Stop and delivery go on.
+  Only slot numbers are written for destinations.
+- **Storage.** Sessions live under `/var/lib/croccante/as-aired` (a bind mount, like the
+  fillers, in the deploy workflow). Bounds are constants in `capture_runtime.py`: a 50 GiB
+  store (`maxTotalBytes`), a 50 GiB session (`maxSessionBytes`), sessions kept 7 days (168 h,
+  `retentionDays`), 6 s segments, classification `internal`. Worst case: the copy has the
+  relay's bitrate, about 2.1 GB per hour at 4.6 Mbit/s, so the store holds roughly 24 hours;
+  opening a session removes expired and then the oldest finished sessions first, and a session
+  that reaches its size ends `partial` with `disk_full`.
+- **Metrics** (the private `/metrics`, bounded labels only):
+  `croccante_as_aired_capture_state{state}` (one set of a closed vocabulary, `unavailable`
+  when there is no session), `croccante_as_aired_capture_segments`,
+  `croccante_as_aired_capture_bytes` and `croccante_as_aired_capture_recorder_failures_total`.
+- **Known gap:** a container that dies mid-broadcast leaves that session non-terminal on disk;
+  retention never deletes non-terminal sessions, so such a session keeps its bytes until it is
+  removed by hand. Tracked as a follow-up.
 
 - **Capture leg.** `build_capture_command` is `ffmpeg -c copy` into numbered
   MPEG-TS segments under `<root>/<sessionId>/artifacts/`. The source must be an absolute local path or a credential-free `rtmp://`
@@ -229,6 +269,6 @@ Offsets of relay/filler transitions come from the host clock and the segment
 timeline from ffprobe durations, so a transition is accurate to the clock skew
 between them, not to a frame.
 
-Unverified here: a live relay soak, the Start/Stop wiring, image packaging, and
-real-time capture from a running relay. The ffmpeg command and the ffprobe
-parser were exercised against a synthetic MPEG-TS source during development.
+Declared profile: the capture declares the broadcast profile; a live publisher whose stream
+differs (another frame rate or size) has its segment discarded and the session ends `partial`
+(`capture_interrupted`). Not verified: a long soak against the real relay host.

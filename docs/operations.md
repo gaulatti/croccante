@@ -9,7 +9,7 @@ croccante only needs 1935, bound to loopback.
 # 1. Deployment directory
 sudo mkdir -p /opt/croccante
 sudo chown $USER /opt/croccante
-mkdir -p /opt/croccante/fillers
+mkdir -p /opt/croccante/fillers /opt/croccante/as-aired
 
 # 2. Independent machine credential used only by Alana. Transfer it through
 # the approved secret channel; do not paste it into shell history.

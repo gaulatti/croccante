@@ -67,7 +67,7 @@ def probe(path: Path) -> dict:
 
 def raw(**overrides) -> dict:
     value = {
-        "enabled": True, "source": "rtmp://127.0.0.1/live/program", "segmentSeconds": 10,
+        "source": "rtmp://127.0.0.1/live/program", "segmentSeconds": 10,
         "maxSessionBytes": 10_000, "maxTotalBytes": 20_000, "retentionDays": 7,
         "classification": "public-broadcast", "video": VIDEO, "audio": AUDIO,
     }
@@ -106,10 +106,11 @@ class Base(unittest.TestCase):
 
 
 class SettingsTests(Base):
-    def test_capture_is_off_unless_explicitly_enabled(self) -> None:
-        self.assertIsNone(CaptureSettings.from_mapping(None, root=self.root))
-        self.assertIsNone(CaptureSettings.from_mapping({"enabled": False}, root=self.root))
-        self.assertIsNone(CaptureSettings.from_mapping({"enabled": "true"}, root=self.root))
+    def test_there_is_no_enabled_setting_and_settings_are_required(self) -> None:
+        with self.assertRaises(CaptureConfigError):
+            CaptureSettings.from_mapping(raw(enabled=True), root=self.root)
+        with self.assertRaises(CaptureConfigError):
+            CaptureSettings.from_mapping(None, root=self.root)  # type: ignore[arg-type]
 
     def test_valid_settings_and_every_rejection(self) -> None:
         self.assertEqual(self.settings.segment_seconds, 10)
@@ -120,7 +121,7 @@ class SettingsTests(Base):
             {"unknown": 1}, {"segmentSeconds": 1}, {"segmentSeconds": True}, {"segmentSeconds": "10"},
             {"maxSessionBytes": 0}, {"retentionDays": 366}, {"source": "rtmps://example.invalid/x"},
             {"source": 5}, {"classification": "secret"}, {"classification": None}, {"legalHold": "yes"}, {"video": None, "audio": None}, {"video": "h264"},
-            {"maxSessionBytes": 30_000},
+            {"maxSessionBytes": 30_000}, {"enabled": True},
             {"source": "rtmp://127.0.0.1.evil.example/live"}, {"source": "rtmp://user:pw@127.0.0.1/x"},
             {"source": "rtmp://localhost@evil.example/x"}, {"source": "/tmp/a://b"}, {"source": "http://127.0.0.1/x"},
         ]
@@ -581,6 +582,75 @@ class RetentionTests(Base):
         fresh = self.facade(session_id="22222222-2222-4222-8222-222222222222")
         self.assertFalse(stale.exists())
         self.assertEqual(self.manifest(fresh)["state"], "recording")
+
+
+FILLER = "/var/lib/croccante/fillers/abc/v1/filler.flv"
+
+
+class RetargetTests(Base):
+    def test_a_file_source_is_paced_and_looped_and_a_live_one_is_not(self) -> None:
+        file_command = build_capture_command(self.settings, self.root / "s", 1, FILLER)
+        self.assertEqual(file_command[file_command.index("-i") + 1], FILLER)
+        self.assertEqual(file_command[file_command.index("-re") + 1 : file_command.index("-re") + 3], ["-stream_loop", "-1"])
+        live_command = build_capture_command(self.settings, self.root / "s", 1)
+        self.assertNotIn("-re", live_command)
+        self.assertEqual(live_command[live_command.index("-i") + 1], "rtmp://127.0.0.1/live/program")
+
+    def test_retarget_swaps_the_capture_process_and_keeps_the_session_recording(self) -> None:
+        cap = self.facade()
+        first = self.processes[0]
+        self.segment(cap.session.directory, 1)
+        cap.retarget(FILLER)
+        self.assertTrue(first.terminated)
+        self.assertEqual(len(self.processes), 2)
+        self.assertEqual(self.commands[-1][self.commands[-1].index("-i") + 1], FILLER)
+        self.assertEqual(cap.session.state, "recording")
+        self.assertEqual(cap.session.segment_count, 1)
+        self.assertEqual(cap.failures, 0)
+        self.assertEqual(cap.session.next_file_number, 2)
+
+    def test_retarget_to_the_same_source_does_nothing(self) -> None:
+        cap = self.facade()
+        cap.retarget("rtmp://127.0.0.1/live/program")
+        self.assertEqual(len(self.processes), 1)
+        self.assertFalse(self.processes[0].terminated)
+
+    def test_a_retarget_to_a_non_local_source_is_a_counted_fault_not_an_exception(self) -> None:
+        cap = self.facade()
+        cap.retarget("rtmp://ingest.example/live/key")
+        self.assertEqual(cap.failures, 1)
+        self.assertEqual(len(self.processes), 1)
+
+    def test_an_interrupted_session_restarts_on_the_new_source_when_it_recovers(self) -> None:
+        cap = self.facade()
+        self.processes[0].alive = False
+        cap.poll()
+        self.assertEqual(cap.session.state, "interrupted")
+        cap.retarget(FILLER)
+        self.assertEqual(len(self.processes), 1)
+        cap.recover()
+        self.assertEqual(self.commands[-1][self.commands[-1].index("-i") + 1], FILLER)
+        self.assertEqual(cap.session.state, "recording")
+
+
+class BeforeFinalizeTests(Base):
+    def test_the_hook_runs_after_the_last_segments_and_before_the_session_closes(self) -> None:
+        cap = self.facade()
+        self.segment(cap.session.directory, 1)
+        seen: list[tuple[int, str]] = []
+        cap.close(before_finalize=lambda: seen.append((cap.session.segment_count, cap.session.state)))
+        self.assertEqual(seen, [(1, "recording")])
+        self.assertIn(self.manifest(cap)["state"], {"complete", "partial"})
+
+    def test_a_raising_hook_is_counted_and_the_session_still_closes(self) -> None:
+        cap = self.facade()
+
+        def broken() -> None:
+            raise RuntimeError("attempt evidence unavailable")
+
+        cap.close(before_finalize=broken)
+        self.assertEqual(cap.failures, 1)
+        self.assertTrue(cap.session.terminal)
 
 
 if __name__ == "__main__":

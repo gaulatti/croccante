@@ -577,6 +577,37 @@ check "Stop terminates every destination publisher (${procs} procs)" "$([ "${pro
 wait_for_control_mode idle 10
 check "control state reports deliberate idle" $?
 
+# As-aired capture is always on: the session that ran live, then filler, then live again closes to a
+# terminal manifest and report with a destination slot but no URL and no stream key (Start/Stop wiring).
+wait_for_capture_manifest() { # timeout
+    for _ in $(seq 1 "$1"); do
+        if docker exec croccante-under-test sh -c 'ls /var/lib/croccante/as-aired/*/report.txt >/dev/null 2>&1'; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+wait_for_capture_manifest 90
+check "Stop closes the as-aired capture to a terminal manifest and report" $? "no report.txt under as-aired after 90s"
+docker exec croccante-under-test python3 - <<'PY'
+import json, sys
+from pathlib import Path
+sys.path.insert(0, "/usr/local/bin")
+from recording_manifest import validate_manifest
+sessions = sorted(Path("/var/lib/croccante/as-aired").glob("*/manifest.json"))
+assert sessions, "no capture session"
+manifest = json.loads(sessions[0].read_text())
+validate_manifest(manifest)
+assert manifest["state"] in {"complete", "partial", "failed"}, manifest["state"]
+assert manifest["destinations"], "no destination slot recorded"
+modes = [event["mode"] for event in manifest["capture"]["sourceTimeline"]]
+assert "live" in modes and "filler" in modes, modes
+PY
+check "the manifest passes validate_manifest and shows live and filler intervals" $?
+leak=$(docker exec croccante-under-test sh -c 'grep -rlE "rtmps?://|srt://|abcd-efgh|unreachable|smoke-stream-id" /var/lib/croccante/as-aired --include=manifest.json --include=report.txt | wc -l' | tr -d ' \n')
+check "no destination URL or stream key in any capture manifest or report" "$([ "$leak" = 0 ] && echo 0 || echo 1)" "$leak files matched"
+
 duplicate=$(control_request POST stop "$TEST_CONTROL_TOKEN" explicit-stop 2)
 check "duplicate Stop returns the recorded idempotent result" \
     "$(printf '%s' "$duplicate" | tail -n 1 | grep -q '"duplicate":true' && echo 0 || echo 1)"

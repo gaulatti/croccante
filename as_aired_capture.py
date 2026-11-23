@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in as-aired capture of Croccante's final relay/filler output.
+"""As-aired capture of Croccante's final relay/filler output.
 
 This module is the recorder runtime for the v1 recording contract
 (`recording_manifest.py`). It is deliberately separate from Alana's clean
@@ -57,12 +57,12 @@ _RESERVE = 4
 
 
 class CaptureConfigError(ValueError):
-    """The opt-in capture settings are missing, ambiguous, or out of bounds."""
+    """The capture settings are missing, ambiguous, or out of bounds."""
 
 
 @dataclass(frozen=True)
 class CaptureSettings:
-    """Explicit opt-in settings. There is no default-enabled instance."""
+    """Capture settings. Capture is always on."""
 
     root: Path
     source: str
@@ -76,13 +76,13 @@ class CaptureSettings:
     legal_hold: bool = False
 
     @staticmethod
-    def from_mapping(raw: Mapping[str, Any] | None, *, root: Path) -> "CaptureSettings | None":
-        """Return None unless capture was explicitly enabled; reject bad values."""
+    def from_mapping(raw: Mapping[str, Any], *, root: Path) -> "CaptureSettings":
+        """Validate the settings; reject unknown, missing or out-of-bounds values."""
 
-        if raw is None or raw.get("enabled") is not True:
-            return None
+        if not isinstance(raw, Mapping):
+            raise CaptureConfigError("invalid_settings")
         allowed = {
-            "enabled", "source", "segmentSeconds", "maxSessionBytes", "maxTotalBytes",
+            "source", "segmentSeconds", "maxSessionBytes", "maxTotalBytes",
             "retentionDays", "classification", "legalHold", "video", "audio",
         }
         if set(raw) - allowed:
@@ -132,11 +132,17 @@ def _local_source(source: str) -> bool:
     return parts.scheme == "rtmp" and parts.hostname in _LOOPBACK and parts.username is None and parts.password is None
 
 
-def build_capture_command(settings: CaptureSettings, session_dir: Path, start_number: int) -> list[str]:
-    """ffmpeg arguments for the capture leg: stream copy into numbered segments."""
+def build_capture_command(settings: CaptureSettings, session_dir: Path, start_number: int, source: str | None = None) -> list[str]:
+    """ffmpeg arguments for the capture leg: stream copy into numbered segments.
 
+    A local file source (the filler asset) is read at real time and looped, as
+    the destination supervisors read it; a live input is read as it arrives.
+    """
+
+    source = source or settings.source
+    paced = ["-re", "-stream_loop", "-1", "-fflags", "+genpts"] if source.startswith("/") else []
     return [
-        "ffmpeg", "-nostdin", "-loglevel", "error", "-i", settings.source,
+        "ffmpeg", "-nostdin", "-loglevel", "error", *paced, "-i", source,
         "-map", "0", "-c", "copy", "-f", "segment",
         "-segment_time", str(settings.segment_seconds),
         "-segment_format", CONTAINER, "-segment_start_number", str(start_number),
@@ -561,6 +567,7 @@ class AsAiredCapture:
         self.failures = 0
         self.session: AsAiredSession | None = None
         self._start, self._probe, self._process = start, probe, None
+        self._source = settings.source
         self._stopped = False
         self._clock = clock
         self._args = (destination_count, configuration_hash, session_id)
@@ -588,7 +595,7 @@ class AsAiredCapture:
 
     def _launch(self) -> None:
         assert self.session is not None
-        command = build_capture_command(self.settings, self.session.directory, self.session.next_file_number)
+        command = build_capture_command(self.settings, self.session.directory, self.session.next_file_number, self._source)
         self._process = self._start(command)
 
     def _alive(self) -> bool:
@@ -608,6 +615,25 @@ class AsAiredCapture:
         """Called on every relay <-> filler transition."""
 
         self._record(lambda: self.session.note_source(mode))
+
+    def retarget(self, source: str) -> None:
+        """Follow the relay between its live input and the filler asset, keeping the session."""
+
+        self._record(lambda: self._retarget(source))
+
+    def _retarget(self, source: str) -> None:
+        assert self.session is not None
+        if not _local_source(source):
+            raise CaptureConfigError("invalid_source")
+        if source == self._source:
+            return
+        self._source = source
+        if self.session.state != "recording":
+            return  # an interrupted session restarts on the new source when it recovers
+        self._stop_process()
+        self._poll_after_stop()
+        self._stopped = False
+        self._launch()
 
     def destination_started(self, slot: int) -> None:
         self._record(lambda: self.session.begin_destination_attempt(slot))
@@ -655,18 +681,24 @@ class AsAiredCapture:
             self._process.terminate()
             self._process.wait(timeout=10)
 
-    def close(self) -> None:
-        """Stop capture and finalize. Failure leaves a failed/partial manifest, never an exception."""
+    def close(self, before_finalize: Callable[[], None] | None = None) -> None:
+        """Stop capture and finalize. Failure leaves a failed/partial manifest, never an exception.
+
+        `before_finalize` runs once the last segments are registered and before the session
+        closes, so a caller can end its destination attempts against the final byte count.
+        """
 
         if not self._active():
             return
-        if not self._guard(self._close):
+        if not self._guard(lambda: self._close(before_finalize)):
             self._guard(lambda: self.session.fail("finalization_failed", "finalization"))
 
-    def _close(self) -> None:
+    def _close(self, before_finalize: Callable[[], None] | None = None) -> None:
         assert self.session is not None
         self._stop_process()
         self._poll_after_stop()
+        if before_finalize is not None:
+            self._guard(before_finalize)
         self.session.finalize()
 
     def _poll_after_stop(self) -> None:
