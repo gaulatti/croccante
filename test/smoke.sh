@@ -224,6 +224,10 @@ recorded_bytes() { # sink container -> total bytes recorded
 
 # busybox has no `pgrep -c`, and `pgrep ... || echo 0` silently reports zero on
 # an unrecognised option — which made this assertion pass no matter what.
+# What those processes are, for a failure message.
+ffmpeg_list() {
+    docker exec croccante-under-test sh -c "ps -o pid,args | grep '[f]fmpeg' | cut -c1-160" 2>/dev/null | tr '\n' ';'
+}
 # Destination publishers only: the as-aired capture runs its own ffmpeg (-f segment), which is not one.
 ffmpeg_procs() {
     docker exec croccante-under-test sh -c "ps -o args | grep '[f]fmpeg' | grep -v -e '-f segment' | wc -l" 2>/dev/null | tr -d ' \n'
@@ -573,8 +577,13 @@ stopped=$(control_command stop 2 explicit-stop)
 check "authenticated Stop is accepted" "$(printf '%s\n' "$stopped" | head -n 1 | grep -q 200 && echo 0 || echo 1)"
 wait_for_idle 10
 check "Stop reaches idle without a container restart" $? "state was $(dest_state 1)"
-procs=$(ffmpeg_procs)
-check "Stop terminates every destination publisher (${procs} procs)" "$([ "${procs:-0}" -eq 0 ] && echo 0 || echo 1)"
+# A destination's ffmpeg is signalled at Stop and may take a moment to exit on a busy runner.
+for _ in 1 2 3 4 5; do
+    procs=$(ffmpeg_procs)
+    [ "${procs:-0}" -eq 0 ] && break
+    sleep 1
+done
+check "Stop terminates every destination publisher (${procs} procs)" "$([ "${procs:-0}" -eq 0 ] && echo 0 || echo 1)" "$(ffmpeg_list)"
 wait_for_control_mode idle 10
 check "control state reports deliberate idle" $?
 
@@ -631,7 +640,7 @@ duplicate_start=$(control_command start 3 fresh-start)
 check "duplicate Start returns the recorded idempotent result" \
     "$(printf '%s' "$duplicate_start" | tail -n 1 | grep -q '"duplicate":true' && echo 0 || echo 1)"
 procs=$(ffmpeg_procs)
-check "duplicate Start creates no parallel publishers (${procs} procs)" "$([ "${procs:-0}" -le 5 ] && echo 0 || echo 1)"
+check "duplicate Start creates no parallel publishers (${procs} procs)" "$([ "${procs:-0}" -le 5 ] && echo 0 || echo 1)" "$(ffmpeg_list)"
 echo
 
 # ── Test 12: the healthcheck can actually fail ───────────────────────────────
