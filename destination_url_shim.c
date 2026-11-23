@@ -23,6 +23,8 @@ int avio_open2(AVIOContext **context, const char *url, int flags,
     static avio_open2_fn real_avio_open2;
     static const char placeholder_prefix[] =
         "rtmp://127.0.0.1:1/croccante-destination/";
+    static const char srt_placeholder_prefix[] =
+        "srt://127.0.0.1:1/croccante-destination/";
     const char *destination;
 
     if (real_avio_open2 == NULL) {
@@ -33,7 +35,8 @@ int avio_open2(AVIOContext **context, const char *url, int flags,
     }
 
     if (url != NULL &&
-        strncmp(url, placeholder_prefix, sizeof(placeholder_prefix) - 1) == 0) {
+        (strncmp(url, placeholder_prefix, sizeof(placeholder_prefix) - 1) == 0 ||
+         strncmp(url, srt_placeholder_prefix, sizeof(srt_placeholder_prefix) - 1) == 0)) {
         destination = getenv("CROCCANTE_DESTINATION_URL");
         if (destination == NULL || destination[0] == '\0') {
             return -1;

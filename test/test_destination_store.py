@@ -44,6 +44,7 @@ class DestinationStoreTest(unittest.TestCase):
         parsed = parse_selection(selection(
             {"id": "youtube", "secretId": "youtube-secret", "versionId": "version-0001"},
             {"id": "facebook", "secretId": "facebook-secret", "versionId": "version-0002"},
+            {"id": "haivision", "secretId": "srt-secret", "versionId": "version-0003"},
         ))
         provider = DictProvider({
             ("youtube-secret", "version-0001"): {
@@ -52,11 +53,15 @@ class DestinationStoreTest(unittest.TestCase):
             ("facebook-secret", "version-0002"): {
                 "scheme": "rtmps", "host": "live.example", "port": 443, "application": "rtmp", "streamKey": "fake-key-b",
             },
+            ("srt-secret", "version-0003"): {
+                "scheme": "srt", "host": "srt.example", "port": 9000, "streamId": "stream-1", "passphrase": "passphrase123",
+            },
         })
         resolved = resolve_selection(parsed, provider)
-        self.assertEqual([item.destination_id for item in resolved.destinations], ["youtube", "facebook"])
+        self.assertEqual([item.destination_id for item in resolved.destinations], ["youtube", "facebook", "haivision"])
         self.assertEqual(resolved.destinations[0].url, "rtmp://a.rtmp.example/live2/fake-key-a")
         self.assertEqual(resolved.destinations[1].url, "rtmps://live.example:443/rtmp/fake-key-b")
+        self.assertEqual(resolved.destinations[2].url, "srt://srt.example:9000?streamid=stream-1&passphrase=passphrase123")
         self.assertEqual(len(parsed.selection_hash), 64)
 
     def test_rejects_unbounded_duplicate_or_malformed_selection(self) -> None:

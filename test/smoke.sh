@@ -15,17 +15,18 @@ PROGRAM_ID=croccante-smoke-program
 TEST_CONTROL_TOKEN=croccante-smoke-control-token
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
-CONTROL_SECRET_FILE=$(mktemp "${TMPDIR:-/tmp}/croccante-control.XXXXXX")
+CONTROL_SECRET_FILE=$(mktemp "${TMP_DIR:-$HERE}/croccante-control.XXXXXX")
 printf '%s\n' "$TEST_CONTROL_TOKEN" > "$CONTROL_SECRET_FILE"
 # A stream key shaped like a real one, so we can assert it never reaches a log.
 FAKE_KEY="abcd-efgh-ijkl-mnop-qrst"
-FAKE_SECRETS_FILE=$(mktemp "${TMPDIR:-/tmp}/croccante-destinations.XXXXXX")
+FAKE_SECRETS_FILE=$(mktemp "${TMP_DIR:-$HERE}/croccante-destinations.XXXXXX")
 cat > "$FAKE_SECRETS_FILE" <<EOF
 {
   "sink-a": {"version-a": {"scheme": "rtmp", "host": "sink-a", "port": 1935, "application": "live", "streamKey": "$FAKE_KEY"}},
   "sink-b": {"version-b": {"scheme": "rtmp", "host": "sink-b", "port": 1935, "application": "live", "streamKey": "$FAKE_KEY"}},
   "sink-tls": {"version-tls": {"scheme": "rtmps", "host": "sink-tls", "port": 443, "application": "live", "streamKey": "$FAKE_KEY"}},
-  "sink-down": {"version-down": {"scheme": "rtmp", "host": "192.0.2.1", "port": 1935, "application": "live", "streamKey": "unreachable"}}
+  "sink-down": {"version-down": {"scheme": "rtmp", "host": "192.0.2.1", "port": 1935, "application": "live", "streamKey": "unreachable"}},
+  "sink-srt": {"version-srt": {"scheme": "srt", "host": "sink-srt", "port": 9998, "streamId": "smoke-stream-id", "passphrase": "$FAKE_KEY"}}
 }
 EOF
 
@@ -45,7 +46,7 @@ check() { # name, condition-result, detail
 }
 
 cleanup() {
-    docker rm -f croccante-under-test croccante-nodest publisher sink-a sink-b sink-tls filler-source >/dev/null 2>&1
+    docker rm -f croccante-under-test croccante-nodest publisher sink-a sink-b sink-tls sink-srt filler-source >/dev/null 2>&1
     docker network rm "$NET" >/dev/null 2>&1
 }
 finish() {
@@ -72,6 +73,7 @@ start_sinks() {
     docker run -d --name sink-a --network "$NET" "$SINK_IMAGE" >/dev/null
     docker run -d --name sink-b --network "$NET" "$SINK_IMAGE" >/dev/null
     docker run -d --name sink-tls --network "$NET" -e TLS=1 "$SINK_IMAGE" >/dev/null
+    docker run -d --name sink-srt --network "$NET" -e SRT=1 -e SRT_PASSPHRASE="$FAKE_KEY" -e SRT_STREAMID="smoke-stream-id" "$SINK_IMAGE" >/dev/null
     docker run -d --name filler-source --network "$NET" --entrypoint sh "$IMAGE" -c '
         mkdir -p /source
         ffmpeg -hide_banner -loglevel error -y -f lavfi -i color=c=blue:s=320x240 -frames:v 1 /source/filler.bmp
@@ -127,6 +129,7 @@ selection = {"version": "smoke-destinations-v1", "destinations": [
     {"id": "sink-b", "secretId": "sink-b", "versionId": "version-b"},
     {"id": "sink-tls", "secretId": "sink-tls", "versionId": "version-tls"},
     {"id": "sink-down", "secretId": "sink-down", "versionId": "version-down"},
+    {"id": "sink-srt", "secretId": "sink-srt", "versionId": "version-srt"},
 ]}
 body = json.dumps(selection).encode()
 request = urllib.request.Request(f"http://127.0.0.1:8081/v1/programs/{program}/session/{action}", data=body, headers={"Authorization": f"Bearer {token}", "Idempotency-Key": key, "X-Command-Sequence": sequence, "X-Filler-Version": "test-default", "Content-Type": "application/json"}, method="POST")
@@ -148,6 +151,7 @@ payload = {"commandId": "smoke-destinations-prepare", "version": "smoke-destinat
     {"id": "sink-b", "secretId": "sink-b", "versionId": "version-b"},
     {"id": "sink-tls", "secretId": "sink-tls", "versionId": "version-tls"},
     {"id": "sink-down", "secretId": "sink-down", "versionId": "version-down"},
+    {"id": "sink-srt", "secretId": "sink-srt", "versionId": "version-srt"},
 ]}
 body = json.dumps(payload).encode()
 request = urllib.request.Request(f"http://127.0.0.1:8081/v1/programs/{program}/destinations/smoke-destinations-v1", data=body, headers={"Authorization": f"Bearer {token}", "Idempotency-Key": "smoke-destinations-prepare", "Content-Type": "application/json"}, method="PUT")
@@ -362,16 +366,17 @@ wait_for_state relaying 30
 check "Start reaches live relay state" $? "state was $(dest_state 1)"
 sleep 12
 
-a=$(recorded_bytes sink-a); b=$(recorded_bytes sink-b); t=$(recorded_bytes sink-tls)
+a=$(recorded_bytes sink-a); b=$(recorded_bytes sink-b); t=$(recorded_bytes sink-tls); s=$(recorded_bytes sink-srt)
 check "sink-a received data (${a} bytes)"   "$([ "${a:-0}" -gt 20000 ] && echo 0 || echo 1)" "only ${a} bytes"
 check "sink-b received data (${b} bytes)"   "$([ "${b:-0}" -gt 20000 ] && echo 0 || echo 1)" "only ${b} bytes"
 
-# ── Test 3: native RTMPS output ──────────────────────────────────────────────
-bold "Test 3 — native rtmps:// output works with secret-free process arguments"
+# ── Test 3: native RTMPS and SRT output ──────────────────────────────────────
+bold "Test 3 — native rtmps:// and srt:// output works with secret-free process arguments"
 check "rtmps sink received data (${t} bytes)" "$([ "${t:-0}" -gt 20000 ] && echo 0 || echo 1)" "only ${t} bytes"
+check "srt sink received data (${s} bytes)"   "$([ "${s:-0}" -gt 20000 ] && echo 0 || echo 1)" "only ${s} bytes"
 process_args=$(docker exec croccante-under-test ps -o args 2>/dev/null)
-check "process arguments omit complete destinations and stream keys" \
-    "$(printf '%s' "$process_args" | grep -qE "$FAKE_KEY|sink-a:1935|sink-tls:443" && echo 1 || echo 0)"
+check "process arguments omit complete destinations, stream keys and passphrases" \
+    "$(printf '%s' "$process_args" | grep -qE "$FAKE_KEY|sink-a:1935|sink-tls:443|sink-srt:9998|smoke-stream-id" && echo 1 || echo 0)"
 echo
 
 # ── Test 4: a failing destination does not disturb the others ────────────────
@@ -397,7 +402,7 @@ check "collector reports the isolated failure and retry" $?
 echo
 
 # ── Test 5: no key material in logs ──────────────────────────────────────────
-bold "Test 5 — stream keys never reach the logs"
+bold "Test 5 — stream keys and passphrases never reach the logs"
 if echo "$logs" | grep -q "$FAKE_KEY"; then
     key_absent=1
 else
@@ -405,7 +410,11 @@ else
 fi
 check "key absent from container logs" "$key_absent" "the fake key appeared in logs"
 check "resolved destination hosts are absent from logs" \
-    "$(printf '%s' "$logs" | grep -qE 'sink-a:1935|sink-b:1935|sink-tls:443|192\.0\.2\.1' && echo 1 || echo 0)"
+    "$(printf '%s' "$logs" | grep -qE 'sink-a:1935|sink-b:1935|sink-tls:443|sink-srt:9998|192\.0\.2\.1' && echo 1 || echo 0)"
+check "stream id absent from logs" \
+    "$(printf '%s' "$logs" | grep -q 'smoke-stream-id' && echo 1 || echo 0)"
+check "stream id and passphrase absent from metrics" \
+    "$(printf '%s' "$failure_metrics" | grep -qE "$FAKE_KEY|smoke-stream-id" && echo 1 || echo 0)"
 echo
 
 # ── Test 6: healthcheck reflects relay state ─────────────────────────────────
@@ -487,7 +496,7 @@ echo
 bold "Test 9 — filler covers a publisher gap without starving destinations"
 
 # Fresh containers so the event log starts clean.
-docker rm -f croccante-under-test publisher sink-a sink-b sink-tls >/dev/null 2>&1
+docker rm -f croccante-under-test publisher sink-a sink-b sink-tls sink-srt >/dev/null 2>&1
 start_sinks
 start_croccante
 
@@ -541,8 +550,8 @@ check "still relaying after repeated transitions (state=$(dest_state 1))" "$([ "
 
 stale=$(stale_pidfiles)
 procs=$(ffmpeg_procs)
-check "no stale pid files after repeated transitions (${stale})" "$([ "${stale:-0}" -le 4 ] && echo 0 || echo 1)"
-check "ffmpeg process count is bounded (${procs})" "$([ "${procs:-0}" -le 4 ] && echo 0 || echo 1)" "${procs} processes suggests a leak"
+check "no stale pid files after repeated transitions (${stale})" "$([ "${stale:-0}" -le 5 ] && echo 0 || echo 1)"
+check "ffmpeg process count is bounded (${procs})" "$([ "${procs:-0}" -le 5 ] && echo 0 || echo 1)" "${procs} processes suggests a leak"
 
 # The measurement that justifies the simple design over a FIFO re-architecture.
 gap=$(max_outbound_gap sink-a)
@@ -588,7 +597,7 @@ duplicate_start=$(control_command start 3 fresh-start)
 check "duplicate Start returns the recorded idempotent result" \
     "$(printf '%s' "$duplicate_start" | tail -n 1 | grep -q '"duplicate":true' && echo 0 || echo 1)"
 procs=$(ffmpeg_procs)
-check "duplicate Start creates no parallel publishers (${procs} procs)" "$([ "${procs:-0}" -le 4 ] && echo 0 || echo 1)"
+check "duplicate Start creates no parallel publishers (${procs} procs)" "$([ "${procs:-0}" -le 5 ] && echo 0 || echo 1)"
 echo
 
 # ── Test 12: the healthcheck can actually fail ───────────────────────────────
