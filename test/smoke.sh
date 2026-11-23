@@ -224,8 +224,9 @@ recorded_bytes() { # sink container -> total bytes recorded
 
 # busybox has no `pgrep -c`, and `pgrep ... || echo 0` silently reports zero on
 # an unrecognised option — which made this assertion pass no matter what.
+# Destination publishers only: the as-aired capture runs its own ffmpeg (-f segment), which is not one.
 ffmpeg_procs() {
-    docker exec croccante-under-test sh -c "ps -o args | grep -c '[f]fmpeg' || true" 2>/dev/null | tr -d ' \n'
+    docker exec croccante-under-test sh -c "ps -o args | grep '[f]fmpeg' | grep -v -e '-f segment' | wc -l" 2>/dev/null | tr -d ' \n'
 }
 
 dest_state() {
@@ -605,7 +606,9 @@ modes = [event["mode"] for event in manifest["capture"]["sourceTimeline"]]
 assert "live" in modes and "filler" in modes, modes
 PY
 check "the manifest passes validate_manifest and shows live and filler intervals" $?
-leak=$(docker exec croccante-under-test sh -c 'grep -rlE "rtmps?://|srt://|abcd-efgh|unreachable|smoke-stream-id" /var/lib/croccante/as-aired --include=manifest.json --include=report.txt | wc -l' | tr -d ' \n')
+leak=$(docker exec croccante-under-test sh -c 'find /var/lib/croccante/as-aired \( -name manifest.json -o -name report.txt \) | wc -l; find /var/lib/croccante/as-aired \( -name manifest.json -o -name report.txt \) -exec grep -lE "rtmps?://|srt://|abcd-efgh|unreachable|smoke-stream-id" {} + | wc -l' | tr '\n' ' ')
+checked=${leak%% *}; leak=$(printf '%s' "${leak#* }" | tr -d ' ')
+check "capture manifests and reports were inspected (${checked} files)" "$([ "${checked:-0}" -ge 2 ] && echo 0 || echo 1)"
 check "no destination URL or stream key in any capture manifest or report" "$([ "$leak" = 0 ] && echo 0 || echo 1)" "$leak files matched"
 
 duplicate=$(control_request POST stop "$TEST_CONTROL_TOKEN" explicit-stop 2)

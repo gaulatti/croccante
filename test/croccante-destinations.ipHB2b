@@ -1,7 +1,0 @@
-{
-  "sink-a": {"version-a": {"scheme": "rtmp", "host": "sink-a", "port": 1935, "application": "live", "streamKey": "abcd-efgh-ijkl-mnop-qrst"}},
-  "sink-b": {"version-b": {"scheme": "rtmp", "host": "sink-b", "port": 1935, "application": "live", "streamKey": "abcd-efgh-ijkl-mnop-qrst"}},
-  "sink-tls": {"version-tls": {"scheme": "rtmps", "host": "sink-tls", "port": 443, "application": "live", "streamKey": "abcd-efgh-ijkl-mnop-qrst"}},
-  "sink-down": {"version-down": {"scheme": "rtmp", "host": "192.0.2.1", "port": 1935, "application": "live", "streamKey": "unreachable"}},
-  "sink-srt": {"version-srt": {"scheme": "srt", "host": "sink-srt", "port": 9998, "streamId": "smoke-stream-id", "passphrase": "abcd-efgh-ijkl-mnop-qrst"}}
-}
