@@ -239,6 +239,9 @@ class CaptureRuntime:
         return {"state": str(snapshot["state"]), "segments": int(snapshot["segments"]), "bytes": int(snapshot["bytes"])}
 
     def snapshot(self) -> dict[str, int | str]:
-        """Bounded facts for metrics, from what the last tick saw: it never waits for the recorder."""
+        """Bounded facts for metrics, from what the last tick saw: it never waits for the recorder.
+
+        The values are plain ints and a dict replaced whole by the tick, so a read sees the previous
+        or the new tick's facts, never a half-written one; a counter may lag by one tick."""
 
         return {**self._last, "recorder_failures": self._failures + self._live_failures}

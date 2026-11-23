@@ -202,8 +202,9 @@ master.
   closes open attempts against the final byte count: `accepted` when the relay put bytes on
   air during the attempt, `unknown` otherwise; a slot that leaves the air without failing (stopped,
   waiting) ends its attempt at that moment. `observedBytes` is the program output the capture
-  verified while the attempt was open (the session's bytes, shared by every slot), not a
-  per-destination count and not an acknowledgement by the destination; because segments are
+  verified while the attempt was open (the session's bytes, shared by every slot). It is not a
+  delivered-bytes count and not an acknowledgement by the destination, and `accepted` means only
+  that the relay was putting that output on air to the slot during the attempt; because segments are
   verified after the next one exists, it can lag by up to two segments.
 - **Stop** closes the session; joining the segments runs off the request, so a long recording
   does not delay the Stop response. A capture process that dies is `interrupted`
