@@ -30,7 +30,16 @@ FFMPEG_PID_FILE="$STATE_DIR/dest-$IDX.ffmpeg.pid"
 
 DST=$(cat "$URL_FILE")
 DEST_ID=$(cat "$STATE_DIR/dest-$IDX.id")
-OUTPUT_PLACEHOLDER="rtmp://127.0.0.1:1/croccante-destination/$IDX"
+case "$DST" in
+    srt://*)
+        OUTPUT_FORMAT="mpegts"
+        OUTPUT_PLACEHOLDER="srt://127.0.0.1:1/croccante-destination/$IDX"
+        ;;
+    *)
+        OUTPUT_FORMAT="flv"
+        OUTPUT_PLACEHOLDER="rtmp://127.0.0.1:1/croccante-destination/$IDX"
+        ;;
+esac
 DESTINATION_SHIM="/usr/local/lib/croccante-destination-shim.so"
 
 RW_TIMEOUT="${RELAY_RW_TIMEOUT:-10000000}"
@@ -117,7 +126,7 @@ while true; do
             -i "$SRC" \
             -c copy \
             -rw_timeout "$RW_TIMEOUT" \
-            -f flv "$OUTPUT_PLACEHOLDER" &
+            -f "$OUTPUT_FORMAT" "$OUTPUT_PLACEHOLDER" &
     else
         CROCCANTE_DESTINATION_URL="$DST" LD_PRELOAD="$DESTINATION_SHIM" \
         ffmpeg -hide_banner -loglevel quiet \
@@ -125,7 +134,7 @@ while true; do
             -i "$SRC" \
             -c copy \
             -rw_timeout "$RW_TIMEOUT" \
-            -f flv "$OUTPUT_PLACEHOLDER" &
+            -f "$OUTPUT_FORMAT" "$OUTPUT_PLACEHOLDER" &
     fi
     ff=$!
     atomic_write "$FFMPEG_PID_FILE" "$ff"

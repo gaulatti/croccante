@@ -119,11 +119,22 @@ a deploy to have actually run against the production host.
 ## Destination secrets and IAM
 
 There is no production destination `.env` file. Store each destination in AWS
-Secrets Manager as a JSON object with exactly this allowlist:
+Secrets Manager as a JSON object matching one of the supported scheme allowlists:
 
+For RTMP / RTMPS:
 ```json
 {"scheme":"rtmps","host":"ingest.example","port":443,"application":"live","streamKey":"replace-in-secrets-manager"}
 ```
+
+For SRT:
+```json
+{"scheme":"srt","host":"ingest.example","port":9000,"streamId":"#!::u=user,r=live/stream","passphrase":"replace-in-secrets-manager"}
+```
+
+SRT destinations relay the program with `-c copy` in `mpegts` format. The
+`streamId` and `passphrase` fields are optional (passphrase must be 10–64
+characters if set). Passphrase and stream ID remain ephemeral process state and
+never appear in argv, logs or metrics.
 
 The Croccante runtime principal needs only `secretsmanager:GetSecretValue` for
 the approved destination secret ARNs. It does not need list, create, update, or
@@ -213,7 +224,10 @@ Repeating the same version/request is safe; different content for an existing
 version returns `409`. Failed work leaves ready and active versions untouched.
 The authenticated `/metrics` surface uses only the bounded `outcome` label and
 reports preparation counts, ready-version inventory, and whether a session has
-a bound version. Version, program, source, command, URL, and credential values
+a bound version. `croccante_destination_unknown_keys_total{level}` counts
+destination request keys Croccante does not know and ignored, with `level`
+`request`, `selection` or `destination`, all exposed from 0; the key names are
+never labels. Version, program, source, command, URL, and credential values
 never become labels.
 
 Example from an authorized container on the private network (read the token

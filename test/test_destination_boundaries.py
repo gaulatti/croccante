@@ -43,7 +43,9 @@ class SelectionParsingTest(unittest.TestCase):
     def test_every_malformed_selection_has_a_stable_reason(self) -> None:
         cases = {
             "not-an-object": ("invalid_selection", ["x"]),
-            "extra-field": ("invalid_selection", {"version": "v1", "destinations": [REFERENCE], "extra": 1}),
+            "missing-version": ("invalid_selection", {"destinations": [REFERENCE]}),
+            "missing-destinations": ("invalid_selection", {"version": "v1"}),
+            "reference-missing-key": ("invalid_reference", {"version": "v1", "destinations": [{"id": "a", "secretId": "s"}]}),
             "version-type": ("invalid_version", {"version": 5, "destinations": [REFERENCE]}),
             "version-shape": ("invalid_version", {"version": "has space", "destinations": [REFERENCE]}),
             "destinations-type": ("invalid_destination_count", {"version": "v1", "destinations": "x"}),
@@ -76,6 +78,16 @@ class UrlConstructionTest(unittest.TestCase):
         self.assertEqual(build_url({**SECRET, "host": "2001:db8::1"}), "rtmp://[2001:db8::1]/live/fictional")
         self.assertEqual(build_url({**SECRET, "streamKey": "a%/?"}), "rtmp://ingest.example/live/a%25%2F%3F")
 
+    def test_srt_url_construction(self) -> None:
+        self.assertEqual(build_url({"scheme": "srt", "host": "srt.example"}), "srt://srt.example")
+        self.assertEqual(build_url({"scheme": "srt", "host": "2001:db8::1", "port": 9000}), "srt://[2001:db8::1]:9000")
+        self.assertEqual(build_url({"scheme": "srt", "host": "srt.example", "port": 9000, "streamId": "feed-a"}), "srt://srt.example:9000?streamid=feed-a")
+        self.assertEqual(build_url({"scheme": "srt", "host": "srt.example", "port": 9000, "passphrase": "passphrase123"}), "srt://srt.example:9000?passphrase=passphrase123")
+        self.assertEqual(
+            build_url({"scheme": "srt", "host": "srt.example", "port": 9000, "streamId": "feed-a", "passphrase": "passphrase123"}),
+            "srt://srt.example:9000?streamid=feed-a&passphrase=passphrase123",
+        )
+
     def test_every_invalid_component_has_a_stable_reason(self) -> None:
         cases = {
             "missing-field": ("invalid_secret_payload", {k: v for k, v in SECRET.items() if k != "host"}),
@@ -93,6 +105,19 @@ class UrlConstructionTest(unittest.TestCase):
             "port-type": ("invalid_port", {**SECRET, "port": "1935"}),
             "port-low": ("invalid_port", {**SECRET, "port": 0}),
             "port-high": ("invalid_port", {**SECRET, "port": 65536}),
+            "rtmp-with-srt-field": ("invalid_secret_payload", {**SECRET, "passphrase": "passphrase123"}),
+            "srt-extra-field": ("invalid_secret_payload", {"scheme": "srt", "host": "srt.example", "extra": 1}),
+            "srt-with-rtmp-field": ("invalid_secret_payload", {"scheme": "srt", "host": "srt.example", "application": "live"}),
+            "srt-stream-id-type": ("invalid_stream_id", {"scheme": "srt", "host": "srt.example", "streamId": 123}),
+            "srt-stream-id-empty": ("invalid_stream_id", {"scheme": "srt", "host": "srt.example", "streamId": ""}),
+            "srt-stream-id-too-long": ("invalid_stream_id", {"scheme": "srt", "host": "srt.example", "streamId": "a" * 513}),
+            "srt-stream-id-space": ("invalid_stream_id", {"scheme": "srt", "host": "srt.example", "streamId": "a b"}),
+            "srt-stream-id-forbidden": ("invalid_stream_id", {"scheme": "srt", "host": "srt.example", "streamId": "a&b"}),
+            "srt-passphrase-type": ("invalid_passphrase", {"scheme": "srt", "host": "srt.example", "passphrase": 123}),
+            "srt-passphrase-too-short": ("invalid_passphrase", {"scheme": "srt", "host": "srt.example", "passphrase": "short"}),
+            "srt-passphrase-too-long": ("invalid_passphrase", {"scheme": "srt", "host": "srt.example", "passphrase": "p" * 65}),
+            "srt-passphrase-space": ("invalid_passphrase", {"scheme": "srt", "host": "srt.example", "passphrase": "pass phrase 123"}),
+            "srt-passphrase-forbidden": ("invalid_passphrase", {"scheme": "srt", "host": "srt.example", "passphrase": "passphrase&123"}),
         }
         for name, (reason, secret) in cases.items():
             with self.subTest(case=name):

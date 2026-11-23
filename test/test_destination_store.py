@@ -44,6 +44,7 @@ class DestinationStoreTest(unittest.TestCase):
         parsed = parse_selection(selection(
             {"id": "youtube", "secretId": "youtube-secret", "versionId": "version-0001"},
             {"id": "facebook", "secretId": "facebook-secret", "versionId": "version-0002"},
+            {"id": "haivision", "secretId": "srt-secret", "versionId": "version-0003"},
         ))
         provider = DictProvider({
             ("youtube-secret", "version-0001"): {
@@ -52,11 +53,15 @@ class DestinationStoreTest(unittest.TestCase):
             ("facebook-secret", "version-0002"): {
                 "scheme": "rtmps", "host": "live.example", "port": 443, "application": "rtmp", "streamKey": "fake-key-b",
             },
+            ("srt-secret", "version-0003"): {
+                "scheme": "srt", "host": "srt.example", "port": 9000, "streamId": "stream-1", "passphrase": "passphrase123",
+            },
         })
         resolved = resolve_selection(parsed, provider)
-        self.assertEqual([item.destination_id for item in resolved.destinations], ["youtube", "facebook"])
+        self.assertEqual([item.destination_id for item in resolved.destinations], ["youtube", "facebook", "haivision"])
         self.assertEqual(resolved.destinations[0].url, "rtmp://a.rtmp.example/live2/fake-key-a")
         self.assertEqual(resolved.destinations[1].url, "rtmps://live.example:443/rtmp/fake-key-b")
+        self.assertEqual(resolved.destinations[2].url, "srt://srt.example:9000?streamid=stream-1&passphrase=passphrase123")
         self.assertEqual(len(parsed.selection_hash), 64)
 
     def test_rejects_unbounded_duplicate_or_malformed_selection(self) -> None:
@@ -72,9 +77,41 @@ class DestinationStoreTest(unittest.TestCase):
                 for index in range(21)
             ]))
         with self.assertRaisesRegex(DestinationError, "invalid_reference"):
-            parse_selection(selection({"id": "a", "secretId": "s", "versionId": "v", "url": "rtmp://forbidden"}))
+            parse_selection(selection({"id": "a", "secretId": "s"}))
+        with self.assertRaisesRegex(DestinationError, "invalid_selection"):
+            parse_selection({"destinations": []})
         with self.assertRaisesRegex(DestinationError, "invalid_secret_reference"):
             parse_selection(selection({"id": "a", "secretId": "secret with spaces", "versionId": "v"}))
+
+    def test_ignores_unknown_keys_without_reading_them(self) -> None:
+        # gaulatti/ariston#217: a key Croccante does not know is ignored and
+        # reported, never refused and never read. A URL smuggled into a
+        # reference cannot reach the resolved destination or the hash.
+        seen: list[str] = []
+        plain = parse_selection(selection({"id": "a", "secretId": "s", "versionId": "version-a"}))
+        extended = parse_selection(
+            {
+                **selection({"id": "a", "secretId": "s", "versionId": "version-a", "url": "rtmp://forbidden", "label": "Main"}),
+                "priority": "high",
+            },
+            on_unknown=seen.append,
+        )
+        self.assertEqual(sorted(seen), ["destination", "destination", "selection"])
+        self.assertEqual(extended.selection_hash, plain.selection_hash)
+        self.assertEqual(extended.references, plain.references)
+        provider = DictProvider({("s", "version-a"): {"scheme": "rtmp", "host": "example.test", "application": "live", "streamKey": "key"}})
+        self.assertEqual(resolve_selection(extended, provider).destinations[0].url, "rtmp://example.test/live/key")
+
+    def test_reports_unknown_keys_only_for_an_accepted_selection(self) -> None:
+        seen: list[str] = []
+        with self.assertRaisesRegex(DestinationError, "invalid_destination_count"):
+            parse_selection({"version": "broadcast-v7", "destinations": [], "extra": 1}, on_unknown=seen.append)
+        self.assertEqual(seen, [])
+        # Without a listener, unknown keys are still ignored.
+        self.assertEqual(
+            parse_selection({**selection({"id": "a", "secretId": "s", "versionId": "version-a", "x": 1}), "y": 2}).version,
+            "broadcast-v7",
+        )
 
     def test_rejects_unsupported_or_overbroad_secret_payloads(self) -> None:
         with self.assertRaisesRegex(DestinationError, "unsupported_scheme"):
@@ -118,9 +155,13 @@ class DestinationStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             supervisor = root / "supervisor.sh"
+            # The second destination's supervisor fails at its exec boundary
+            # and the first keeps running. The loser is chosen by index, not
+            # by racing a shared lock: an external `mkdir` is not atomic on
+            # every runner's coreutils, so a lock race could let both live.
             supervisor.write_text(
                 "#!/bin/sh\n"
-                "mkdir \"$0.lock\" 2>/dev/null || exit 1\n"
+                "[ \"$1\" = 2 ] && exit 1\n"
                 "trap 'exit 0' TERM INT\nwhile true; do sleep 1; done\n",
                 encoding="utf-8",
             )
@@ -138,8 +179,8 @@ class DestinationStoreTest(unittest.TestCase):
                 ("two", "v1"): {"scheme": "rtmp", "host": "two.example", "application": "live", "streamKey": "two"},
             })
             # The runtime's fixed fail-fast window is shorter than a loaded CI
-            # runner needs to schedule both shells, so the losing supervisor
-            # may not have run mkdir yet. Make the window deterministic by
+            # runner needs to schedule both shells, so the failing supervisor
+            # may not have exited yet. Make the window deterministic by
             # waiting (bounded) until one supervisor has really exited.
             spawned: list[subprocess.Popen[bytes]] = []
             real_popen = subprocess.Popen
@@ -159,6 +200,12 @@ class DestinationStoreTest(unittest.TestCase):
                     patch.object(destination_runtime.time, "sleep", wait_for_loser):
                 with self.assertRaisesRegex(DestinationError, "supervisor_start_failed"):
                     runtime.activate(resolve_selection(parsed, provider))
+            # Exactly the second supervisor failed on its own; the first was
+            # still running and was stopped by the rollback.
+            self.assertEqual(len(spawned), 2)
+            self.assertEqual(spawned[1].returncode, 1)
+            self.assertNotEqual(spawned[0].returncode, 1)
+            self.assertIsNotNone(spawned[0].returncode)
             self.assertIsNone(runtime.active)
             self.assertEqual(runtime.processes, [])
             self.assertEqual((root / "dest.count").read_text().strip(), "0")
