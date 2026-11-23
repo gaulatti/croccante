@@ -159,8 +159,8 @@ test('the scored route, repair bound, protected purpose and deployment handoff r
   // Anything that replaces the live relay needs the owner's explicit confirmation.
   for (const path of [...config.deployment.paths, '.github/workflows/deploy.yml']) assert.ok(config.sensitive_paths.includes(path), path);
   assert.ok(!config.deployment.paths.includes('.github/workflows/deploy.yml'));
-  for (const shipped of ['control-server.py', 'Dockerfile', 'relay-dest.sh']) assert.ok(config.deployment.paths.includes(shipped), shipped);
-  for (const unshipped of ['recording_manifest.py', 'test/smoke.sh', 'README.md', '.github/workflows/ci.yml', '.github/clouseau.json']) assert.ok(!config.deployment.paths.includes(unshipped), unshipped);
+  for (const shipped of ['control-server.py', 'Dockerfile', 'relay-dest.sh', 'as_aired_capture.py', 'capture_runtime.py', 'recording_manifest.py']) assert.ok(config.deployment.paths.includes(shipped), shipped);
+  for (const unshipped of ['test/smoke.sh', 'README.md', '.github/workflows/ci.yml', '.github/clouseau.json']) assert.ok(!config.deployment.paths.includes(unshipped), unshipped);
   assert.equal(workflow.jobs['finalize-merge'].permissions.actions, 'write');
 });
 

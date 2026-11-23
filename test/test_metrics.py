@@ -205,5 +205,32 @@ class MetricsTest(unittest.TestCase):
         self.assertNotIn("private-wrong-token", payload)
 
 
+class CaptureMetricsTest(unittest.TestCase):
+    def values(self, snapshot: dict) -> dict:
+        return {(name, tuple(sorted(labels.items()))): value for name, labels, value in parse_exposition(relay_metrics.render_capture(snapshot))}
+
+    def test_exactly_one_state_is_set_from_a_closed_vocabulary(self) -> None:
+        values = self.values({"state": "recording", "segments": 4, "bytes": 99, "recorder_failures": 2})
+        states = {dict(labels)["state"]: value for (name, labels), value in values.items() if name == "croccante_as_aired_capture_state"}
+        self.assertEqual(set(states), set(relay_metrics.CAPTURE_STATES))
+        self.assertEqual([state for state, value in states.items() if value == 1.0], ["recording"])
+        self.assertEqual(values[("croccante_as_aired_capture_segments", ())], 4.0)
+        self.assertEqual(values[("croccante_as_aired_capture_bytes", ())], 99.0)
+        self.assertEqual(values[("croccante_as_aired_capture_recorder_failures_total", ())], 2.0)
+
+    def test_an_unknown_state_is_bounded_and_counts_never_go_negative(self) -> None:
+        text = relay_metrics.render_capture({"state": "rtmp://secret/key", "segments": -1, "bytes": -5, "recorder_failures": -2})
+        self.assertNotIn("secret", text)
+        values = self.values({"state": "rtmp://secret/key", "segments": -1, "bytes": -5, "recorder_failures": -2})
+        self.assertEqual(values[("croccante_as_aired_capture_state", (("state", "unavailable"),))], 1.0)
+        self.assertEqual(values[("croccante_as_aired_capture_segments", ())], 0.0)
+        self.assertEqual(values[("croccante_as_aired_capture_bytes", ())], 0.0)
+        self.assertEqual(values[("croccante_as_aired_capture_recorder_failures_total", ())], 0.0)
+
+    def test_an_empty_snapshot_is_unavailable(self) -> None:
+        values = self.values({})
+        self.assertEqual(values[("croccante_as_aired_capture_state", (("state", "unavailable"),))], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

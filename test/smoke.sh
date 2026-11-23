@@ -224,8 +224,13 @@ recorded_bytes() { # sink container -> total bytes recorded
 
 # busybox has no `pgrep -c`, and `pgrep ... || echo 0` silently reports zero on
 # an unrecognised option — which made this assertion pass no matter what.
+# What those processes are, for a failure message.
+ffmpeg_list() {
+    docker exec croccante-under-test sh -c "ps -o pid,args | grep '[f]fmpeg' | cut -c1-160" 2>/dev/null | tr '\n' ';'
+}
+# Destination publishers only: the as-aired capture runs its own ffmpeg (-f segment), which is not one.
 ffmpeg_procs() {
-    docker exec croccante-under-test sh -c "ps -o args | grep -c '[f]fmpeg' || true" 2>/dev/null | tr -d ' \n'
+    docker exec croccante-under-test sh -c "ps -o args | grep '[f]fmpeg' | grep -v -e '-f segment' | wc -l" 2>/dev/null | tr -d ' \n'
 }
 
 dest_state() {
@@ -572,10 +577,48 @@ stopped=$(control_command stop 2 explicit-stop)
 check "authenticated Stop is accepted" "$(printf '%s\n' "$stopped" | head -n 1 | grep -q 200 && echo 0 || echo 1)"
 wait_for_idle 10
 check "Stop reaches idle without a container restart" $? "state was $(dest_state 1)"
-procs=$(ffmpeg_procs)
-check "Stop terminates every destination publisher (${procs} procs)" "$([ "${procs:-0}" -eq 0 ] && echo 0 || echo 1)"
+# A destination's ffmpeg is signalled at Stop and may take a moment to exit on a busy runner.
+for _ in 1 2 3 4 5; do
+    procs=$(ffmpeg_procs)
+    [ "${procs:-0}" -eq 0 ] && break
+    sleep 1
+done
+check "Stop terminates every destination publisher (${procs} procs)" "$([ "${procs:-0}" -eq 0 ] && echo 0 || echo 1)" "$(ffmpeg_list)"
 wait_for_control_mode idle 10
 check "control state reports deliberate idle" $?
+
+# As-aired capture is always on: the session that ran live, then filler, then live again closes to a
+# terminal manifest and report with a destination slot but no URL and no stream key (Start/Stop wiring).
+wait_for_capture_manifest() { # timeout
+    for _ in $(seq 1 "$1"); do
+        if docker exec croccante-under-test sh -c 'ls /var/lib/croccante/as-aired/*/report.txt >/dev/null 2>&1'; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+wait_for_capture_manifest 90
+check "Stop closes the as-aired capture to a terminal manifest and report" $? "no report.txt under as-aired after 90s"
+docker exec croccante-under-test python3 - <<'PY'
+import json, sys
+from pathlib import Path
+sys.path.insert(0, "/usr/local/bin")
+from recording_manifest import validate_manifest
+sessions = sorted(Path("/var/lib/croccante/as-aired").glob("*/manifest.json"))
+assert sessions, "no capture session"
+manifest = json.loads(sessions[0].read_text())
+validate_manifest(manifest)
+assert manifest["state"] in {"complete", "partial", "failed"}, manifest["state"]
+assert manifest["destinations"], "no destination slot recorded"
+modes = [event["mode"] for event in manifest["capture"]["sourceTimeline"]]
+assert "live" in modes and "filler" in modes, modes
+PY
+check "the manifest passes validate_manifest and shows live and filler intervals" $?
+leak=$(docker exec croccante-under-test sh -c 'find /var/lib/croccante/as-aired \( -name manifest.json -o -name report.txt \) | wc -l; find /var/lib/croccante/as-aired \( -name manifest.json -o -name report.txt \) -exec grep -lE "rtmps?://|srt://|abcd-efgh|unreachable|smoke-stream-id" {} + | wc -l' | tr '\n' ' ')
+checked=${leak%% *}; leak=$(printf '%s' "${leak#* }" | tr -d ' ')
+check "capture manifests and reports were inspected (${checked} files)" "$([ "${checked:-0}" -ge 2 ] && echo 0 || echo 1)"
+check "no destination URL or stream key in any capture manifest or report" "$([ "$leak" = 0 ] && echo 0 || echo 1)" "$leak files matched"
 
 duplicate=$(control_request POST stop "$TEST_CONTROL_TOKEN" explicit-stop 2)
 check "duplicate Stop returns the recorded idempotent result" \
@@ -597,7 +640,7 @@ duplicate_start=$(control_command start 3 fresh-start)
 check "duplicate Start returns the recorded idempotent result" \
     "$(printf '%s' "$duplicate_start" | tail -n 1 | grep -q '"duplicate":true' && echo 0 || echo 1)"
 procs=$(ffmpeg_procs)
-check "duplicate Start creates no parallel publishers (${procs} procs)" "$([ "${procs:-0}" -le 5 ] && echo 0 || echo 1)"
+check "duplicate Start creates no parallel publishers (${procs} procs)" "$([ "${procs:-0}" -le 5 ] && echo 0 || echo 1)" "$(ffmpeg_list)"
 echo
 
 # ── Test 12: the healthcheck can actually fail ───────────────────────────────

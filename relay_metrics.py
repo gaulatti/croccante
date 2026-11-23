@@ -337,3 +337,36 @@ def collect() -> str:
         )
 
     return "\n".join(lines) + "\n"
+
+
+CAPTURE_STATES = frozenset(
+    {"pending", "recording", "interrupted", "recovering", "finalizing", "complete", "partial", "failed", "unavailable"}
+)
+
+
+def render_capture(snapshot: dict[str, int | str]) -> str:
+    """As-aired capture gauges from `CaptureRuntime.snapshot()`: a closed state set and counts only."""
+
+    state = str(snapshot.get("state", "unavailable"))
+    state = state if state in CAPTURE_STATES else "unavailable"
+    lines: list[str] = []
+    _metric(
+        lines,
+        "croccante_as_aired_capture_state",
+        "The as-aired capture session state (one of a closed set); unavailable when there is no session.",
+        "gauge",
+    )
+    for name in sorted(CAPTURE_STATES):
+        lines.append(_sample("croccante_as_aired_capture_state", int(name == state), state=name))
+    _metric(lines, "croccante_as_aired_capture_segments", "Verified segments in the current or last capture session.", "gauge")
+    lines.append(_sample("croccante_as_aired_capture_segments", max(0, int(snapshot.get("segments", 0)))))
+    _metric(lines, "croccante_as_aired_capture_bytes", "Bytes of verified segments in the current or last capture session.", "gauge")
+    lines.append(_sample("croccante_as_aired_capture_bytes", max(0, int(snapshot.get("bytes", 0)))))
+    _metric(
+        lines,
+        "croccante_as_aired_capture_recorder_failures_total",
+        "Recorder faults absorbed without affecting delivery, since the process started.",
+        "counter",
+    )
+    lines.append(_sample("croccante_as_aired_capture_recorder_failures_total", max(0, int(snapshot.get("recorder_failures", 0)))))
+    return "\n".join(lines) + "\n"

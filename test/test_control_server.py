@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import destination_runtime
 import relay_metrics
 from destination_store import DestinationError
+from capture_runtime import CaptureRuntime as CaptureRuntimeForTest
 from filler_store import FillerStore, PreparationError
 from test_metrics import parse_exposition
 
@@ -859,6 +860,147 @@ class RealRuntimeWiringTest(ControlServerCase):
         self.assertIs(self.cs.destination_provider(), first)
 
 
+class FakeCapture:
+    """Records what the lifecycle API tells the as-aired capture."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.faults = 0
+
+    def start(self, **arguments: object) -> None:
+        self.calls.append(("start", arguments))
+
+    def stop(self) -> None:
+        self.calls.append(("stop", {}))
+
+    def wait(self, timeout: float = 0) -> None:
+        self.calls.append(("wait", {"timeout": timeout}))
+
+    def tick(self, **arguments: object) -> None:
+        self.calls.append(("tick", arguments))
+
+    def guard(self, action) -> None:
+        try:
+            action()
+        except Exception:  # noqa: BLE001 - mirrors CaptureRuntime.guard
+            self.faults += 1
+
+    def snapshot(self) -> dict:
+        return {"state": "recording", "segments": 3, "bytes": 1234, "recorder_failures": self.faults}
+
+
+class AsAiredCaptureWiringTest(ControlServerCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.capture = FakeCapture()
+        self.cs.CAPTURE = self.capture
+
+    def calls(self, name: str) -> list[dict]:
+        return [arguments for call, arguments in self.capture.calls if call == name]
+
+    def test_start_hands_the_capture_the_broadcast_profile_slot_count_and_configuration_hash(self) -> None:
+        self.prepare_version("v1")
+        self.assertEqual(self.start()[0], 200)
+        [started] = self.calls("start")
+        self.assertEqual(started["profile"], PROFILE)
+        self.assertEqual(started["destination_count"], 1)
+        self.assertRegex(started["configuration_hash"], "^[0-9a-f]{64}$")
+        self.assertNotIn("fictional-key", json.dumps(started))
+
+    def test_a_repeated_start_does_not_restart_the_capture_and_stop_closes_it_once(self) -> None:
+        self.prepare_version("v1")
+        self.start()
+        self.start(key="start-2", sequence=2)
+        self.assertEqual(len(self.calls("start")), 1)
+        self.assertEqual(self.stop(key="stop-1", sequence=3)[0], 200)
+        self.assertEqual(len(self.calls("stop")), 1)
+        self.stop(key="stop-2", sequence=4)
+        self.assertEqual(len(self.calls("stop")), 1)
+
+    def test_a_capture_fault_never_fails_start_or_stop(self) -> None:
+        self.prepare_version("v1")
+
+        def broken(**_arguments: object) -> None:
+            raise RuntimeError("recorder unavailable")
+
+        self.capture.start = broken  # type: ignore[method-assign]
+        status, payload = self.start()
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["commandResult"]["result"], "started")
+        self.assertEqual(self.capture.faults, 1)
+        self.assertEqual(self.stop()[0], 200)
+
+    def test_a_raising_recorder_does_not_fail_start_or_stop(self) -> None:
+        self.prepare_version("v1")
+        real = CaptureRuntimeForTest(self.root / "as-aired")
+        self.cs.CAPTURE = real
+        with patch.object(real, "start", side_effect=OSError("disk gone")):
+            self.assertEqual(self.start()[0], 200)
+            self.assertEqual(self.stop()[0], 200)
+        self.assertGreaterEqual(real.snapshot()["recorder_failures"], 1)
+
+    def _tick(self, *, mode: str, destinations: list[str], stream: str = "program", version: str = "v1") -> dict:
+        state = {"mode": mode, "destinations": [{"mode": item} for item in destinations]}
+        if stream:
+            self.write_state("hooks/publisher", stream)
+        if version:
+            self.write_state("control/active-filler.version", version)
+        with patch.object(self.cs, "current_state", return_value=state):
+            self.cs.capture_tick()
+        return self.calls("tick")[-1]
+
+    def test_live_mode_captures_the_local_rtmp_input_of_the_publisher(self) -> None:
+        tick = self._tick(mode="live", destinations=["relaying", "backoff"])
+        self.assertEqual(tick["live_source"], "rtmp://127.0.0.1:1935/live/program")
+        self.assertIsNone(tick["filler_source"])
+        self.assertEqual(tick["destinations"], ["relaying", "backoff"])
+
+    def test_filler_mode_captures_the_active_filler_asset_as_a_local_file(self) -> None:
+        tick = self._tick(mode="filler", destinations=["filler"])
+        self.assertIsNone(tick["live_source"])
+        self.assertEqual(tick["filler_source"], str(self.cs.FILLER_STORE.version_dir("v1") / "filler.flv"))
+
+    def test_no_source_while_waiting_stopped_or_without_a_publisher_or_filler(self) -> None:
+        for mode in ("waiting-for-publisher", "idle", "failed"):
+            with self.subTest(mode=mode):
+                tick = self._tick(mode=mode, destinations=["waiting"])
+                self.assertEqual((tick["live_source"], tick["filler_source"]), (None, None))
+        (self.state / "hooks" / "publisher").unlink()
+        self.assertIsNone(self._tick(mode="live", destinations=["relaying"], stream="")["live_source"])
+        (self.cs.CONTROL_DIR / "active-filler.version").unlink()
+        self.assertIsNone(self._tick(mode="filler", destinations=["filler"], version="")["filler_source"])
+
+    def test_a_fault_reading_the_relay_state_is_counted_not_raised(self) -> None:
+        with patch.object(self.cs, "current_state", side_effect=OSError("state unreadable")):
+            self.cs.capture_tick()
+        self.assertEqual(self.capture.faults, 1)
+
+    def test_the_capture_loop_ticks_every_interval(self) -> None:
+        sleeps: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            if len(sleeps) == 3:
+                raise SystemExit
+
+        with patch.object(self.cs, "time", types.SimpleNamespace(sleep=sleep, monotonic=time.monotonic)), patch.object(self.cs, "capture_tick") as tick:
+            with self.assertRaises(SystemExit):
+                self.cs.run_capture()
+        self.assertEqual(sleeps, [self.cs.CAPTURE_INTERVAL_SECONDS] * 3)
+        self.assertEqual(tick.call_count, 2)
+
+    def test_metrics_expose_the_bounded_capture_state_and_counts(self) -> None:
+        samples = parse_exposition(self.call("GET", "/metrics")[1]["text"])
+        values = {(name, tuple(sorted(labels.items()))): value for name, labels, value in samples}
+        self.assertEqual(values[("croccante_as_aired_capture_state", (("state", "recording"),))], 1.0)
+        self.assertEqual(values[("croccante_as_aired_capture_state", (("state", "complete"),))], 0.0)
+        self.assertEqual(values[("croccante_as_aired_capture_segments", ())], 3.0)
+        self.assertEqual(values[("croccante_as_aired_capture_bytes", ())], 1234.0)
+        self.assertEqual(values[("croccante_as_aired_capture_recorder_failures_total", ())], 0.0)
+        states = {dict(labels)["state"] for name, labels in values if name == "croccante_as_aired_capture_state"}
+        self.assertEqual(states, set(relay_metrics.CAPTURE_STATES))
+
+
 class ProcessEntryPointTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -911,6 +1053,24 @@ class ProcessEntryPointTest(unittest.TestCase):
                 self.handlers[number](number, None)
             self.assertEqual(raised.exception.code, 0)
         self.assertEqual(runtime.calls, ["deactivate", "deactivate"])
+
+    def test_main_starts_the_capture_loop_and_closing_waits_for_the_capture(self) -> None:
+        module = load_server(self.environment)
+        module.ThreadingHTTPServer = self.server_class
+        module.DESTINATION_RUNTIME = RecordingRuntime()
+        capture = FakeCapture()
+        module.CAPTURE = capture
+        started: list[str] = []
+        module.run_capture = lambda: started.append("loop")
+        module.main()
+        for _ in range(100):
+            if started:
+                break
+            time.sleep(0.01)
+        self.assertEqual(started, ["loop"])
+        with self.assertRaises(SystemExit):
+            self.handlers[signal.SIGTERM](signal.SIGTERM, None)
+        self.assertEqual([call for call, _ in capture.calls], ["stop", "wait"])
 
     def test_main_preserves_an_existing_requested_state(self) -> None:
         module = load_server(self.environment)

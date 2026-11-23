@@ -66,11 +66,10 @@ session never switches versions.
 The machine contract and example requests are documented in
 [docs/operations.md](docs/operations.md#lifecycle-control-api).
 
-The versioned, credential-free contract for future as-aired recording manifests
-and bounded operator reports is documented in
-[docs/recording-contract.md](docs/recording-contract.md). This defines the
-fixture-backed boundary only; runtime capture and production wiring remain in
-[issue #17](https://github.com/gaulatti/croccante/issues/17).
+The versioned, credential-free contract for as-aired recording manifests and
+bounded operator reports, and the always-on capture that writes them for every
+session (bounded to 50 GiB and 168 hours, no switch), are documented in
+[docs/recording-contract.md](docs/recording-contract.md).
 
 The same private listener exposes authenticated Prometheus metrics at
 `GET /metrics`. It reports container process, publisher, relay, retry,
@@ -173,6 +172,8 @@ croccante/
 ├── control-server.py    # Authenticated, program-scoped Start/Stop/state API
 ├── relay_metrics.py     # Bounded Prometheus collector for private scraping
 ├── recording_manifest.py # Versioned recording manifest validation and reports
+├── as_aired_capture.py  # As-aired recorder: segments, verification, quota, retention
+├── capture_runtime.py   # Always-on capture driven by Start/Stop and the relay state
 ├── contracts/           # Closed machine-readable recording contract schemas
 ├── filler_store.py      # Durable immutable source preparation and validation
 ├── docs/                # Architecture and operations (destined for the wiki)

@@ -18,6 +18,9 @@ on:
       - 'relay-start.sh'
       - 'relay-stop.sh'
       - 'control-server.py'
+      - 'as_aired_capture.py'
+      - 'capture_runtime.py'
+      - 'recording_manifest.py'
       - 'destination_runtime.py'
       - 'destination_store.py'
       - 'destination_url_shim.c'
@@ -160,8 +163,14 @@ jobs:
             docker pull "$IMAGE_REF" || fail "docker pull $IMAGE_REF"
             docker tag  "$IMAGE_REF" "$IMAGE_LATEST" || fail "docker tag to $IMAGE_LATEST"
 
+            step "checking the host files and variables"
+            test -s /opt/croccante/control-token || fail "missing or empty /opt/croccante/control-token"
+            test -s /opt/croccante/aws-credentials || fail "missing or empty /opt/croccante/aws-credentials"
+            test -n "$PROGRAM_ID" || fail "PROGRAM_ID is not set"
+            test -n "$AWS_REGION" || fail "AWS_REGION is not set"
+
             step "preparing the host directories and the broadcast-control network"
-            mkdir -p /opt/croccante/fillers || fail "mkdir /opt/croccante/fillers"
+            mkdir -p /opt/croccante/fillers /opt/croccante/as-aired || fail "mkdir /opt/croccante/fillers /opt/croccante/as-aired"
             docker network inspect broadcast-control >/dev/null 2>&1 || docker network create broadcast-control >/dev/null || fail "docker network create broadcast-control"
 
             # ── The only window in which the stream is actually down ─────────
@@ -182,6 +191,7 @@ jobs:
               --mount type=bind,src=/opt/croccante/control-token,dst=/run/secrets/croccante-control-token,readonly \
               --mount type=bind,src=/opt/croccante/aws-credentials,dst=/run/secrets/aws-credentials,readonly \
               --mount type=bind,src=/opt/croccante/fillers,dst=/var/lib/croccante/fillers \
+              --mount type=bind,src=/opt/croccante/as-aired,dst=/var/lib/croccante/as-aired \
               -p 127.0.0.1:1935:1935 \
               "$IMAGE_REF" >/dev/null || fail "docker run croccante from $IMAGE_REF"
             END=$(date +%s%3N)
