@@ -128,26 +128,48 @@ jobs:
             sh -c '
             set -eu
 
+            # Every step says what it is doing, and every failure names what failed.
+            step() { echo "==> $*"; }
+            fail() { echo "::error::deploy failed at: $*" >&2; exit 1; }
+            # Each required variable is checked by name before any container is touched.
+            require_var() {
+              eval "value=\${$1:-}"
+              [ -n "$value" ] || fail "required variable $1 is not set on the deploy host or in the workflow env"
+            }
+            require_file() {
+              [ -s "$1" ] || fail "required file $1 is missing or empty on the deploy host"
+            }
+
             cleanup() { docker logout ghcr.io >/dev/null 2>&1 || true; }
             trap cleanup EXIT
 
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            step "checking required variables"
+            for name in GHCR_TOKEN GHCR_USER IMAGE_REF IMAGE_LATEST PROGRAM_ID AWS_REGION; do
+              require_var "$name"
+            done
+            step "checking required files"
+            require_file /opt/croccante/control-token
+            require_file /opt/croccante/aws-credentials
+
+            step "logging in to ghcr.io"
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin || fail "docker login to ghcr.io"
 
             # Pull BEFORE stopping anything. The download is the slow part; doing
             # it first keeps the interruption to the container swap alone.
-            docker pull "$IMAGE_REF"
-            docker tag  "$IMAGE_REF" "$IMAGE_LATEST"
-            test -s /opt/croccante/control-token
-            test -s /opt/croccante/aws-credentials
-            test -n "$PROGRAM_ID"
-            test -n "$AWS_REGION"
-            mkdir -p /opt/croccante/fillers
-            docker network inspect broadcast-control >/dev/null 2>&1 || docker network create broadcast-control >/dev/null
+            step "pulling $IMAGE_REF"
+            docker pull "$IMAGE_REF" || fail "docker pull $IMAGE_REF"
+            docker tag  "$IMAGE_REF" "$IMAGE_LATEST" || fail "docker tag to $IMAGE_LATEST"
+
+            step "preparing the host directories and the broadcast-control network"
+            mkdir -p /opt/croccante/fillers || fail "mkdir /opt/croccante/fillers"
+            docker network inspect broadcast-control >/dev/null 2>&1 || docker network create broadcast-control >/dev/null || fail "docker network create broadcast-control"
 
             # ── The only window in which the stream is actually down ─────────
+            step "swapping the container: stopping the running one"
             START=$(date +%s%3N)
             docker stop croccante >/dev/null 2>&1 || true
             docker rm   croccante >/dev/null 2>&1 || true
+            step "swapping the container: starting $IMAGE_REF"
             docker run -d \
               --name croccante \
               --restart unless-stopped \
@@ -161,24 +183,26 @@ jobs:
               --mount type=bind,src=/opt/croccante/aws-credentials,dst=/run/secrets/aws-credentials,readonly \
               --mount type=bind,src=/opt/croccante/fillers,dst=/var/lib/croccante/fillers \
               -p 127.0.0.1:1935:1935 \
-              "$IMAGE_REF" >/dev/null
+              "$IMAGE_REF" >/dev/null || fail "docker run croccante from $IMAGE_REF"
             END=$(date +%s%3N)
             echo "::notice::Stream interruption window: $((END - START)) ms"
 
             # Fail the deploy if the new container is not actually healthy.
-            echo "Waiting for health..."
+            step "waiting for the container health check"
             for i in $(seq 1 30); do
               status=$(docker inspect -f "{{.State.Health.Status}}" croccante 2>/dev/null || echo starting)
               [ "$status" = "healthy" ] && { echo "healthy after ${i}s"; break; }
               if [ "$status" = "unhealthy" ]; then
                 echo "container reported unhealthy:"
                 docker logs --tail 50 croccante
-                exit 1
+                fail "container health check reported unhealthy"
               fi
               sleep 1
             done
             [ "$(docker inspect -f "{{.State.Health.Status}}" croccante)" = "healthy" ] || {
-              echo "container never became healthy:"; docker logs --tail 50 croccante; exit 1; }
+              echo "container never became healthy:"; docker logs --tail 50 croccante; fail "container never became healthy within 30s"; }
 
+            step "pruning unused images"
             docker image prune -f >/dev/null
+            step "deploy finished: croccante is healthy on $IMAGE_REF"
             '
